@@ -1,0 +1,119 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0" version="29.5.4">
+  <diagram name="Page-1" id="Hr0Q1CHeKmXfKpw-Xq4u">
+    <mxGraphModel dx="2050" dy="1226" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="MG_L6XsP76n2wDDY1odr-35" edge="1" parent="1" source="MG_L6XsP76n2wDDY1odr-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="MG_L6XsP76n2wDDY1odr-36" value="Wireless Communication">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="426" y="450" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-1" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;" value="HapNav Pin" vertex="1">
+          <mxGeometry height="300" width="612" x="119" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-2" parent="MG_L6XsP76n2wDDY1odr-1" style="whiteSpace=wrap;html=1;aspect=fixed;fillColor=#f8cecc;strokeColor=#b85450;" value="MCU" vertex="1">
+          <mxGeometry height="80" width="80" x="170" y="51" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-15" edge="1" parent="MG_L6XsP76n2wDDY1odr-1" source="MG_L6XsP76n2wDDY1odr-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" target="MG_L6XsP76n2wDDY1odr-2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-3" parent="MG_L6XsP76n2wDDY1odr-1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="Inertial Measurement Unit" vertex="1">
+          <mxGeometry height="50" width="80" x="20" y="66" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-13" edge="1" parent="MG_L6XsP76n2wDDY1odr-1" source="MG_L6XsP76n2wDDY1odr-6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="MG_L6XsP76n2wDDY1odr-2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-6" parent="MG_L6XsP76n2wDDY1odr-1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="Time of Flight" vertex="1">
+          <mxGeometry height="40" width="70" x="410" y="36" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-14" edge="1" parent="MG_L6XsP76n2wDDY1odr-1" source="MG_L6XsP76n2wDDY1odr-9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="MG_L6XsP76n2wDDY1odr-2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-9" parent="MG_L6XsP76n2wDDY1odr-1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="Time of Flight" vertex="1">
+          <mxGeometry height="40" width="70" x="410" y="86" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-10" parent="MG_L6XsP76n2wDDY1odr-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="Downward Diagonal Right" vertex="1">
+          <mxGeometry height="30" width="80" x="485" y="91" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-16" parent="MG_L6XsP76n2wDDY1odr-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="Chest &amp;amp; Head Level" vertex="1">
+          <mxGeometry height="30" width="80" x="485" y="41" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-20" edge="1" parent="MG_L6XsP76n2wDDY1odr-1" source="MG_L6XsP76n2wDDY1odr-18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="MG_L6XsP76n2wDDY1odr-2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-18" parent="MG_L6XsP76n2wDDY1odr-1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="Time of Flight" vertex="1">
+          <mxGeometry height="40" width="70" x="410" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-19" parent="MG_L6XsP76n2wDDY1odr-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="Downward Diagonal Left" vertex="1">
+          <mxGeometry height="30" width="80" x="485" y="141" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-23" edge="1" parent="MG_L6XsP76n2wDDY1odr-1" source="MG_L6XsP76n2wDDY1odr-21" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="MG_L6XsP76n2wDDY1odr-2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="341" y="170" />
+              <mxPoint x="210" y="170" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-21" parent="MG_L6XsP76n2wDDY1odr-1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="Magnetometer" vertex="1">
+          <mxGeometry height="40" width="89" x="321" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-25" parent="MG_L6XsP76n2wDDY1odr-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="[Measure the velocity acceleration in 3 axes]" vertex="1">
+          <mxGeometry height="30" width="125" x="5" y="121" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-32" connectable="0" parent="MG_L6XsP76n2wDDY1odr-1" style="group" value="" vertex="1">
+          <mxGeometry height="110" width="240" x="20" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-29" parent="MG_L6XsP76n2wDDY1odr-32" style="verticalLabelPosition=bottom;verticalAlign=top;html=1;shape=card;whiteSpace=wrap;size=20;arcSize=12;" value="" vertex="1">
+          <mxGeometry height="110" width="240" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-30" parent="MG_L6XsP76n2wDDY1odr-32" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;autosize=1;resizable=0;" value="&lt;div&gt;Processing:&lt;/div&gt;&lt;div&gt;&lt;ol&gt;&lt;li&gt;spacial mapping&lt;/li&gt;&lt;li&gt;danger zone classification&lt;/li&gt;&lt;li&gt;obstacle detection&lt;/li&gt;&lt;/ol&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="200" x="20" y="15.714285714285714" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-27" parent="MG_L6XsP76n2wDDY1odr-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;rotation=0;" value="[Get the distance data of obstacles]" vertex="1">
+          <mxGeometry height="30" width="155" x="410" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="BRW8WP_U9c6EuN73fnk_-1" parent="MG_L6XsP76n2wDDY1odr-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;rotation=0;" value="[Get the orientation data]" vertex="1">
+          <mxGeometry height="30" width="155" x="278.5" y="250" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-36" parent="1" style="swimlane;whiteSpace=wrap;html=1;swimlaneFillColor=none;rounded=1;glass=0;swimlaneLine=1;shadow=0;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="HapNav Wristband" vertex="1">
+          <mxGeometry height="190" width="612" x="119" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-40" edge="1" parent="MG_L6XsP76n2wDDY1odr-36" source="MG_L6XsP76n2wDDY1odr-37" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="MG_L6XsP76n2wDDY1odr-39">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-37" parent="MG_L6XsP76n2wDDY1odr-36" style="whiteSpace=wrap;html=1;aspect=fixed;fillColor=#f8cecc;strokeColor=#b85450;" value="MCU" vertex="1">
+          <mxGeometry height="80" width="80" x="230" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-42" edge="1" parent="MG_L6XsP76n2wDDY1odr-36" source="MG_L6XsP76n2wDDY1odr-39" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="MG_L6XsP76n2wDDY1odr-41">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-45" edge="1" parent="MG_L6XsP76n2wDDY1odr-36" source="MG_L6XsP76n2wDDY1odr-39" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="MG_L6XsP76n2wDDY1odr-44">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-39" parent="MG_L6XsP76n2wDDY1odr-36" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Vibration Driver" vertex="1">
+          <mxGeometry height="40" width="72" x="430" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-41" parent="MG_L6XsP76n2wDDY1odr-36" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Haptic Actuator 1" vertex="1">
+          <mxGeometry height="40" width="82" x="390" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-44" parent="MG_L6XsP76n2wDDY1odr-36" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Haptic Actuator &#39;n&#39;" vertex="1">
+          <mxGeometry height="40" width="82" x="502" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-46" parent="MG_L6XsP76n2wDDY1odr-36" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="[Vibration feedback via multi-zone actuators]" vertex="1">
+          <mxGeometry height="30" width="130" x="420" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-48" connectable="0" parent="MG_L6XsP76n2wDDY1odr-36" style="group" value="" vertex="1">
+          <mxGeometry height="120" width="210" x="10" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-49" parent="MG_L6XsP76n2wDDY1odr-48" style="verticalLabelPosition=bottom;verticalAlign=top;html=1;shape=card;whiteSpace=wrap;size=20;arcSize=12;" value="" vertex="1">
+          <mxGeometry height="110.76923076923077" width="191.73913043478265" as="geometry" />
+        </mxCell>
+        <mxCell id="MG_L6XsP76n2wDDY1odr-50" parent="MG_L6XsP76n2wDDY1odr-48" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;autosize=1;resizable=1;movable=1;rotatable=1;deletable=1;editable=1;locked=0;connectable=1;" value="&lt;div&gt;Do:&lt;/div&gt;&lt;div&gt;&lt;ol&gt;&lt;li&gt;direction encoding&lt;/li&gt;&lt;li&gt;intensity encoding&lt;/li&gt;&lt;li&gt;pattern encoding&lt;/li&gt;&lt;/ol&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="92.3076923076923" width="146.08695652173915" x="4.56217391304348" y="9.232087912087911" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
