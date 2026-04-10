@@ -2106,3 +2106,4 @@ bool LSM6DSO::configureTap(uint8_t settings) {
   else
       return true;
 }
+
