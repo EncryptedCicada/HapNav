@@ -10,6 +10,7 @@ produce a fault and stop functioning.
 
 #include <Wire.h>
 #include "Haptic_Driver.h"
+#include <ArduinoBLE.h>
 
 Haptic_Driver hapDrive;
 
@@ -31,6 +32,12 @@ void setup(){
   Wire.begin();
   Serial.begin(115200);
 
+  // bluetooth setup
+  BLE.begin();
+  BLE.scanForName("ESP32_Sensor");
+
+
+  // haptic driver setup
   if( !hapDrive.begin())
     Serial.println("Could not communicate with Haptic Driver.");
   else
@@ -55,6 +62,20 @@ void setup(){
 
 void loop(){
 
+  BLEDevice peripheral = BLE.available();
+  if (peripheral) {
+    if (peripheral.connect()) {
+      // after connection, look for the characteristic with the specified UUID
+      BLECharacteristic dataChar = peripheral.characteristic("beb5483e-36e1-4688-b7f5-ea07361b26a8");
+      
+      if (dataChar) {
+        uint8_t value = 0;
+        dataChar.read(); // read data
+        dataChar.readValue(value);
+        // control multiplexer channel based on received value
+      }
+    }
+  }
   // If uploading often the Haptic Driver IC will throw a fault. Let's
   // clear that error (0x10), just in case.
   //event = hapDrive.getIrqEvent();
