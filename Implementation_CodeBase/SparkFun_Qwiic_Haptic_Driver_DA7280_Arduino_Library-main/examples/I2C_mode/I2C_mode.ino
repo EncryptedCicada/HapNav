@@ -15,6 +15,17 @@ Haptic_Driver hapDrive;
 
 int event = 0; 
 
+// for Multiplexer
+#define MUX_ADDR 0x70
+void selectMuxChannel(uint8_t channel) {
+  if (channel > 3) return; // 這款只有 4 個通道 (0-3)
+
+  Wire.beginTransmission(MUX_ADDR);
+  // 使用位元左移操作來選擇通道 (1 << 0 = 1, 1 << 1 = 2...)
+  Wire.write(1 << channel); 
+  Wire.endTransmission();
+}
+
 void setup(){
 
   Wire.begin();
@@ -53,9 +64,17 @@ void loop(){
   //hapDrive.clearIrq(event);
 
   // Max value is 127 with acceleration on (default).
+  // set the front motor
+  selectMuxChannel(0);
   hapDrive.setVibrate(25);
   delay(500); 
   hapDrive.setVibrate(0); 
   delay(500);
 
+  // set the back motor
+  selectMuxChannel(2);
+  hapDrive.setVibrate(25);
+  delay(500); 
+  hapDrive.setVibrate(0); 
+  delay(500);
 }
