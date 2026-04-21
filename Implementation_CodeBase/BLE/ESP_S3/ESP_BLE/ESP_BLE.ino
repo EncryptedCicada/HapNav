@@ -3,7 +3,7 @@
 #include <BLEAdvertising.h>
 
 // Define the advertising name. Ensure the Receiver's filter matches this name.
-#define DEV_NAME "ESP32_VAL_TX" 
+#define DEV_NAME "ESP32_S3_TX" 
 
 BLEAdvertising *pAdvertising;
 uint32_t counter = 0;
@@ -27,7 +27,7 @@ void setup() {
   mData[1] = 0xFF;
   mData[2] = 0x00; // Initial status value
   advData.setManufacturerData(String(mData, 3));
-
+  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
   pAdvertising->setAdvertisementData(advData);
 
   // Optimization: Adjust advertising parameters for better scanning
@@ -52,12 +52,12 @@ void loop() {
   newAdvData.setName(DEV_NAME);
   
   // Toggle status between 0 and 1
-  uint8_t statusByte = (counter % 2 == 0) ? 0x01 : 0x00; 
+  // uint8_t statusByte = (counter % 2 == 0) ? 0x01 : 0x00; 
   
   uint8_t mData[3];
   mData[0] = 0xFF;
   mData[1] = 0xFF;
-  mData[2] = statusByte;
+  mData[2] = counter % 20;
 
   newAdvData.setManufacturerData(String((char*)mData, 3));
   
@@ -67,5 +67,5 @@ void loop() {
   Serial.print("Update Payload - Counter: ");
   Serial.print(counter);
   Serial.print(" | Status: ");
-  Serial.println(statusByte);
+  Serial.println(mData[2]);
 }
