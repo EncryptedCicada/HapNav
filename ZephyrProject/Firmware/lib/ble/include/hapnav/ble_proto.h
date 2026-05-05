@@ -3,8 +3,9 @@
  *
  * One GATT service, one writable characteristic. Every sample period the pin
  * fuses its IMU + mag into a quaternion, grabs the latest VL53L5CX 8x8 ToF
- * frame, and writes the combined frame (write-without-response) to the
- * wristband. The wristband prints it as JSON.
+ * frame, runs the obstacle-detection pipeline, and writes the combined frame
+ * (write-without-response) to the wristband. The wristband prints it as JSON
+ * today; later it'll use the `obstacles` block to drive its 4 LRAs directly.
  */
 #ifndef HAPNAV_BLE_PROTO_H_
 #define HAPNAV_BLE_PROTO_H_
@@ -24,17 +25,41 @@
 #define HAPNAV_TOF_ZONES   64   /* 8x8 grid */
 
 /*
- * Combined per-sample frame, 212 bytes packed.
- * `timestamp_ms` is the pin's k_uptime_get_32() at frame assembly; kept for
- * latency debugging (not printed).
+ * Per-sample obstacle report — what the wristband ultimately consumes to drive
+ * its 4 LRAs. Dense format so the wristband becomes a thin "drive LRA k at
+ * urgency[k]" loop later; flags carry qualitative state (drop-off, blocked).
+ *
+ * Channel mapping (one bin = two ToF columns of the 8-wide grid):
+ *   urgency[0]  LEFT          azimuth bin [-22.3°, -11.1°]
+ *   urgency[1]  CENTER-LEFT   azimuth bin [-11.1°,   0°  ]
+ *   urgency[2]  CENTER-RIGHT  azimuth bin [   0°,  +11.1°]
+ *   urgency[3]  RIGHT         azimuth bin [+11.1°, +22.3°]
+ */
+struct hapnav_obstacles {
+	uint8_t urgency[4];        /* 0-255 per channel                      */
+	int16_t nearest_range_mm;  /* closest in-path obstacle, -1 if clear  */
+	uint8_t flags;             /* see HAPNAV_OBS_FLAG_* below            */
+} __packed;                        /* 7 bytes                                */
+
+#define HAPNAV_OBS_FLAG_STATIONARY     (1U << 0)  /* user not moving        */
+#define HAPNAV_OBS_FLAG_SENSOR_BLOCKED (1U << 1)  /* pin against clothing   */
+#define HAPNAV_OBS_FLAG_MOSTLY_INVALID (1U << 2)  /* open space / out of rng*/
+#define HAPNAV_OBS_FLAG_YAW_SLEWING    (1U << 3)  /* user turning head/body */
+#define HAPNAV_OBS_FLAG_DROPOFF        (1U << 4)  /* floor disappearing     */
+
+/*
+ * Combined per-sample frame, 219 bytes packed.
+ * `timestamp_ms` is the pin's k_uptime_get_32() at frame assembly.
  * `quat` is unit quaternion [w, x, y, z] from Madgwick AHRS on the pin.
- * `distances_mm` and `target_status` are VL53L5CX ULD outputs at 8x8 resolution.
+ * `distances_mm` and `target_status` are VL53L5CX ULD outputs at 8x8.
+ * `obstacles` is the post-processed report the wristband acts on.
  */
 struct hapnav_frame {
-	uint32_t timestamp_ms;                  /*   4  */
-	float    quat[4];                       /*  16  */
-	int16_t  distances_mm[HAPNAV_TOF_ZONES]; /* 128 */
-	uint8_t  target_status[HAPNAV_TOF_ZONES];/*  64 */
+	uint32_t timestamp_ms;                    /*   4  */
+	float    quat[4];                         /*  16  */
+	int16_t  distances_mm[HAPNAV_TOF_ZONES];  /* 128  */
+	uint8_t  target_status[HAPNAV_TOF_ZONES]; /*  64  */
+	struct hapnav_obstacles obstacles;        /*   7  */
 } __packed;
 
 #define HAPNAV_FRAME_SIZE  sizeof(struct hapnav_frame)

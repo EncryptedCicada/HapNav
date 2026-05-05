@@ -15,6 +15,8 @@ target_sources(app PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/lis2mdl.c
     ${CMAKE_CURRENT_LIST_DIR}/src/vl53l5cx.c
     ${CMAKE_CURRENT_LIST_DIR}/src/madgwick.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/obstacle.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/dropoff.c
     ${STDRV_DIR}/lsm6dso-pid/lsm6dso_reg.c
     ${STDRV_DIR}/lis2mdl-pid/lis2mdl_reg.c
     ${VL53L5CX_ULD_DIR}/vl53l5cx_api.c

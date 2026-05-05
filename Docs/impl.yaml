@@ -1,0 +1,76 @@
+project: HapNav
+status: Firmware v2 (Obstacle Detection Integrated)
+architecture:
+  chest_pin:
+    mcu: Seeed XIAO ESP32-S3
+    role: BLE Central & Compute Hub
+    sensors:
+      imu: LSM6DSO (I2C 0x6B/0x6A)
+      magnetometer: LIS2MDL (I2C 0x1E)
+      tof_main: VL53L5CX (I2C 0x29/0x52)
+      tof_aux: 2x VL53L1X (Planned)
+  wristband:
+    mcu: Seeed XIAO nRF52840
+    role: BLE Peripheral & Haptic Actuator
+    actuators: 4x DA7280 Haptic Driver + LRA boards (I2C)
+
+geometry_and_physics:
+  user_height_cm: 175
+  mount_point: Chest level (approx. armpit height)
+  sensor_height_m: 1.35
+  sensor_downtilt_deg: 8.0 # Estimated for head-clearance vs floor visibility
+  field_of_view:
+    diagonal_deg: 63
+    per_axis_deg: 44.5
+    grid_resolution: 8x8 (64 zones)
+  operating_range_m: [0.3, 3.0]
+  assumed_walking_speed_mps: 0.7
+  coordinate_system:
+    sensor_frame: "+X right, +Y up, +Z forward (optical axis)"
+    body_frame: "+X right, +Y back, +Z up (-Y is user forward)"
+    world_frame: "Gravity-aligned, Z = up"
+
+ble_communication:
+  protocol: Custom GATT Service
+  mtu: 247 bytes (negotiated)
+  sample_rate: 10 Hz
+  data_frame_v2:
+    size_bytes: 219
+    structure:
+      - timestamp_ms: uint32
+      - quat_wxyz: float32[4] (Madgwick fused)
+      - distances_mm: int16[64]
+      - target_status: uint8[64]
+      - obstacles:
+          urgency: uint8[4] (Left, Center-Left, Center-Right, Right)
+          nearest_range_mm: int16
+          flags: uint8 (Stationary, Blocked, Invalid, Slew, Dropoff)
+
+algorithmic_pipeline:
+  sensor_fusion:
+    algorithm: Madgwick AHRS (MARG variant)
+    beta: 0.1
+    corrections: "Magnetometer X-axis flipped (mag_raw[0] = -mag_raw[0])"
+  obstacle_detection:
+    stages:
+      1_validity: "Filter by status (5,6,9) and range (300-3000mm)"
+      2_projection: "Rotate pre-computed rays B->W using current quaternion"
+      3_classification:
+        floor: "World Z < -1.20m below sensor"
+        ceiling: "World Z > +0.40m above sensor (head + 5cm)"
+        candidate: "Anything between floor and ceiling"
+      4_clustering: "8-connectivity, delta-d threshold 200mm, min-size 2px"
+      5_closing_rate: "Frame-to-frame delta-range tracking (suspended during yaw slew)"
+      6_urgency: "Max(Proximity_Score, TTC_Score) scaled by motion flags"
+  dropoff_detection:
+    logic: "Geometric reasoning over negative space"
+    trigger: "Missing floor returns in expected bottom-row rays"
+    threshold: ">= 3 pixels missing or range ratio > 1.3x predicted"
+
+firmware_stack:
+  rtos: Zephyr 4.4.99
+  build_system: West / CMake
+  toolchain: arm-zephyr-eabi & xtensa-espressif_esp32s3_zephyr-elf
+  shared_libs:
+    - lib/ble: "Shared UUIDs and Frame structs"
+    - lib/sensors: "Zephyr glue for STMicro ULDs + Madgwick + Pipeline"

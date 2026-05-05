@@ -4,6 +4,7 @@
 #include <hapnav/lis2mdl.h>
 #include <hapnav/vl53l5cx.h>
 #include <hapnav/madgwick.h>
+#include <hapnav/obstacle.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -22,8 +23,9 @@ LOG_MODULE_REGISTER(pin_sensors, LOG_LEVEL_INF);
 #define MADGWICK_BETA     0.1f
 
 /* mg → m/s²; mdps → rad/s; mGauss is unitless to Madgwick (only ratios matter). */
-#define MG_TO_MPS2     (HAPNAV_ACCEL_MG_PER_LSB * 0.00980665f)
-#define MDPS_TO_RADPS  (HAPNAV_GYRO_MDPS_PER_LSB * (3.14159265f / 180000.0f))
+#define MG_TO_MPS2          (HAPNAV_ACCEL_MG_PER_LSB * 0.00980665f)
+#define MDPS_TO_RADPS       (HAPNAV_GYRO_MDPS_PER_LSB * (3.14159265f / 180000.0f))
+#define ACCEL_G_PER_LSB     (HAPNAV_ACCEL_MG_PER_LSB * 0.001f)
 
 static struct hapnav_lsm6dso  imu;
 static struct hapnav_lis2mdl  mag;
@@ -38,6 +40,7 @@ int pin_sensors_init(void)
 	int err;
 
 	madgwick_init(&ahrs, MADGWICK_BETA);
+	hapnav_obstacle_init();
 
 	err = hapnav_lsm6dso_init(&imu, i2c, LSM6DSO_I2C_ADDR);
 	if (err) {
@@ -79,13 +82,26 @@ int pin_sensors_sample(struct hapnav_frame *out)
 		return err;
 	}
 
+	/* Mag-X is mounted opposite IMU-X on the board; flip so Madgwick
+	 * sees a magnetic vector consistent with the IMU's frame. */
+	mag_raw[0] = -mag_raw[0];
+
+	float accel_g[3] = {
+		accel_raw[0] * ACCEL_G_PER_LSB,
+		accel_raw[1] * ACCEL_G_PER_LSB,
+		accel_raw[2] * ACCEL_G_PER_LSB,
+	};
+	float gyro_radps[3] = {
+		gyro_raw[0] * MDPS_TO_RADPS,
+		gyro_raw[1] * MDPS_TO_RADPS,
+		gyro_raw[2] * MDPS_TO_RADPS,
+	};
+
 	madgwick_update(&ahrs,
 		accel_raw[0] * MG_TO_MPS2,
 		accel_raw[1] * MG_TO_MPS2,
 		accel_raw[2] * MG_TO_MPS2,
-		gyro_raw[0]  * MDPS_TO_RADPS,
-		gyro_raw[1]  * MDPS_TO_RADPS,
-		gyro_raw[2]  * MDPS_TO_RADPS,
+		gyro_radps[0], gyro_radps[1], gyro_radps[2],
 		mag_raw[0]   * HAPNAV_MAG_MGAUSS_PER_LSB,
 		mag_raw[1]   * HAPNAV_MAG_MGAUSS_PER_LSB,
 		mag_raw[2]   * HAPNAV_MAG_MGAUSS_PER_LSB,
@@ -108,6 +124,10 @@ int pin_sensors_sample(struct hapnav_frame *out)
 			}
 		}
 	}
+
+	hapnav_obstacle_step(out->distances_mm, out->target_status,
+			     out->quat, gyro_radps, accel_g,
+			     SAMPLE_DT_S, &out->obstacles);
 
 	return 0;
 }

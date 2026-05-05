@@ -33,9 +33,15 @@ static void print_frame_json(const struct hapnav_frame *f)
 	for (int i = 0; i < HAPNAV_TOF_ZONES; i++) {
 		printk("%s%u", (i ? "," : ""), f->target_status[i]);
 	}
-	printk("],\"quat\":[%.4f,%.4f,%.4f,%.4f]}\n",
+	printk("],\"quat\":[%.4f,%.4f,%.4f,%.4f],",
 	       (double)f->quat[0], (double)f->quat[1],
 	       (double)f->quat[2], (double)f->quat[3]);
+	printk("\"obstacles\":{\"urgency\":[%u,%u,%u,%u],"
+	       "\"nearest_mm\":%d,\"flags\":%u}}\n",
+	       f->obstacles.urgency[0], f->obstacles.urgency[1],
+	       f->obstacles.urgency[2], f->obstacles.urgency[3],
+	       f->obstacles.nearest_range_mm,
+	       f->obstacles.flags);
 }
 
 static ssize_t frame_write(struct bt_conn *conn,
