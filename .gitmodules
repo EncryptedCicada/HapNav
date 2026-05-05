@@ -1,9 +1,9 @@
 [submodule "ZephyrProject/Drivers/stm32-vl53l5cx"]
 	path = ZephyrProject/Drivers/stm32-vl53l5cx
-	url = git@github.com:EncryptedCicada/stm32-vl53l5cx.git
+	url = https://github.com/EncryptedCicada/stm32-vl53l5cx.git
 [submodule "ZephyrProject/Drivers/lis2mdl-pid"]
 	path = ZephyrProject/Drivers/lis2mdl-pid
-	url = git@github.com:EncryptedCicada/lis2mdl-pid.git
+	url = https://github.com/EncryptedCicada/lis2mdl-pid.git
 [submodule "ZephyrProject/Drivers/lsm6dso-pid"]
 	path = ZephyrProject/Drivers/lsm6dso-pid
-	url = git@github.com:EncryptedCicada/lsm6dso-pid.git
+	url = https://github.com/EncryptedCicada/lsm6dso-pid.git
