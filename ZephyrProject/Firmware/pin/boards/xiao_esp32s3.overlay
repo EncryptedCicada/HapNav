@@ -1,0 +1,17 @@
+/*
+ * XIAO ESP32-S3 chest pin overlay.
+ *
+ * I2C devices on &i2c0 (SDA=GPIO5/D4, SCL=GPIO6/D5):
+ *   - LSM6DSO  IMU          @ 0x6B (Sparkfun Qwiic default)
+ *   - LIS2MDL  magnetometer @ 0x1E
+ *   - VL53L5CX ToF array    @ 0x29  (added later)
+ *   - VL53L1X  ToF L/R      @ 0x29  (XSHUT-shifted, added later)
+ *
+ * The vendor STMicro driver is invoked from app code, not via a Zephyr
+ * sensor binding, so no child nodes are required here — we just need the
+ * bus enabled.
+ */
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;  /* 400 kHz */
+};

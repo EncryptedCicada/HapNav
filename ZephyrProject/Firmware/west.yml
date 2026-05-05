@@ -1,0 +1,24 @@
+manifest:
+  version: "0.13"
+
+  # With NixOS, ZEPHYR_BASE is set by the nix shell so west init is optional.
+  # This manifest is here for explicit version pinning if ever needed.
+  # To use it: west init -l . && west update
+  #
+  # For day-to-day development just enter the nix shell and run west build
+  # directly from the pin/ or wristband/ directories.
+
+  self:
+    path: Firmware
+
+  projects:
+    - name: zephyr
+      url: https://github.com/zephyrproject-rtos/zephyr
+      revision: v3.7.0
+      import: true
+
+  defaults:
+    remote: zephyrproject
+  remotes:
+    - name: zephyrproject
+      url-base: https://github.com/zephyrproject-rtos

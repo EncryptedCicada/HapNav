@@ -1,0 +1,29 @@
+/*
+ * Board overlay for Seeed XIAO nRF52840 (haptic wristband)
+ *
+ * Wire all 4 DA7280 haptic drivers to the same I2C bus.
+ * DA7280 default address is 0x4A; use ADDR pin to shift others.
+ *   driver0 @ 0x4A  (ADDR=GND)
+ *   driver1 @ 0x4B  (ADDR=VDD)
+ *   driver2 @ 0x4C  (custom, see datasheet)
+ *   driver3 @ 0x4D  (custom, see datasheet)
+ *
+ * Uncomment and populate nodes as each driver binding is added.
+ */
+
+/*
+ * I2C (TWIM) node — kept disabled until DA7280 drivers are wired up.
+ * Nordic TWIM requires pinctrl-0 to be defined before setting status = "okay".
+ * Uncomment and add the pinctrl block when ready to bring up haptic drivers.
+ *
+ * &i2c0 {
+ *     status = "okay";
+ *     clock-frequency = <I2C_BITRATE_FAST>;
+ *     pinctrl-0 = <&i2c0_default>;
+ *     pinctrl-1 = <&i2c0_sleep>;
+ *     pinctrl-names = "default", "sleep";
+ *
+ *     haptic0: da7280@4a { compatible = "dlg,da7280"; reg = <0x4a>; };
+ *     haptic1: da7280@4b { compatible = "dlg,da7280"; reg = <0x4b>; };
+ * };
+ */
