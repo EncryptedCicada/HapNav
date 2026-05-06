@@ -1,6 +1,7 @@
 #include "ble.h"
 
 #include <hapnav/ble_proto.h>
+#include <hapnav/haptics.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -59,6 +60,7 @@ static ssize_t frame_write(struct bt_conn *conn,
 
 	struct hapnav_frame f;
 	memcpy(&f, buf, sizeof(f));
+	hapnav_haptics_consume_frame(&f);
 	print_frame_json(&f);
 	return len;
 }

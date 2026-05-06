@@ -1,29 +1,24 @@
 /*
- * Board overlay for Seeed XIAO nRF52840 (haptic wristband)
+ * Board overlay for Seeed XIAO nRF52840 (haptic wristband).
  *
- * Wire all 4 DA7280 haptic drivers to the same I2C bus.
- * DA7280 default address is 0x4A; use ADDR pin to shift others.
- *   driver0 @ 0x4A  (ADDR=GND)
- *   driver1 @ 0x4B  (ADDR=VDD)
- *   driver2 @ 0x4C  (custom, see datasheet)
- *   driver3 @ 0x4D  (custom, see datasheet)
+ * I2C topology (on the XIAO's Qwiic-compatible D4/D5 header → SoC i2c1):
+ *   i2c1 ──┬── PCA9546A 4-channel mux @ 0x70
+ *          ├── ch0 → DA7280 @ 0x4A   (LEFT,         outer-left LRA)
+ *          ├── ch1 → DA7280 @ 0x4A   (CENTER-LEFT,  inner-left LRA)
+ *          ├── ch2 → DA7280 @ 0x4A   (CENTER-RIGHT, inner-right LRA)
+ *          └── ch3 → DA7280 @ 0x4A   (RIGHT,        outer-right LRA)
  *
- * Uncomment and populate nodes as each driver binding is added.
+ * All four DA7280s share the same 7-bit address — they're isolated by the
+ * mux. We don't declare per-driver child nodes here because the haptics
+ * module talks to the bus directly (mirrors the pin's sensor pattern);
+ * only the bus itself needs config.
+ *
+ * `i2c1` is the bus the xiao_ble board file routes to D4 (SDA / P0.04) and
+ * D5 (SCL / P0.05) — the standard Qwiic pinout for this board. The board
+ * common dtsi already enables it and assigns pinctrl, so this overlay just
+ * raises the bus rate to 400 kHz.
  */
 
-/*
- * I2C (TWIM) node — kept disabled until DA7280 drivers are wired up.
- * Nordic TWIM requires pinctrl-0 to be defined before setting status = "okay".
- * Uncomment and add the pinctrl block when ready to bring up haptic drivers.
- *
- * &i2c0 {
- *     status = "okay";
- *     clock-frequency = <I2C_BITRATE_FAST>;
- *     pinctrl-0 = <&i2c0_default>;
- *     pinctrl-1 = <&i2c0_sleep>;
- *     pinctrl-names = "default", "sleep";
- *
- *     haptic0: da7280@4a { compatible = "dlg,da7280"; reg = <0x4a>; };
- *     haptic1: da7280@4b { compatible = "dlg,da7280"; reg = <0x4b>; };
- * };
- */
+&i2c1 {
+	clock-frequency = <I2C_BITRATE_FAST>;  /* 400 kHz */
+};

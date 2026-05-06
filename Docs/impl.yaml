@@ -1,5 +1,15 @@
 project: HapNav
-status: Firmware v2 (Obstacle Detection Integrated)
+status: Firmware v3 (Haptic Policy Integrated)
+docs:
+  overview_index:   Docs/Implementation/00_overview.md
+  chest_pin:        Docs/Implementation/01_chest_pin.md
+  wristband:        Docs/Implementation/02_wristband.md
+  ble_protocol:     Docs/Implementation/03_ble_protocol.md
+  sensor_fusion:    Docs/Implementation/04_sensor_fusion.md
+  obstacle:         Docs/Implementation/05_obstacle_detection.md
+  dropoff:          Docs/Implementation/06_dropoff_detection.md
+  haptic_policy:    Docs/Implementation/07_haptic_policy.md
+  wristband_yaml:   Docs/impl_wristband.yaml
 architecture:
   chest_pin:
     mcu: Seeed XIAO ESP32-S3
@@ -12,7 +22,9 @@ architecture:
   wristband:
     mcu: Seeed XIAO nRF52840
     role: BLE Peripheral & Haptic Actuator
-    actuators: 4x DA7280 Haptic Driver + LRA boards (I2C)
+    i2c_mux: PCA9546A @ 0x70
+    actuators: 4x DA7280 @ 0x4A (one per mux channel) + G1040003D LRA
+    drive_policy: "20 Hz worker; watchdog mute, dropoff square-wave, fatigue taper, rate limit"
 
 geometry_and_physics:
   user_height_cm: 175
@@ -74,3 +86,13 @@ firmware_stack:
   shared_libs:
     - lib/ble: "Shared UUIDs and Frame structs"
     - lib/sensors: "Zephyr glue for STMicro ULDs + Madgwick + Pipeline"
+    - lib/haptics: "PCA9546A mux + Zephyr-native DA7280 driver + 20 Hz drive policy"
+
+driver_notes:
+  da7280:
+    upstream_reference: ZephyrProject/Drivers/da7280/da7280.c
+    upstream_status: "Linux kernel driver — kept as reference, NOT compiled."
+    incompatibilities: "regmap, devm_*, work_struct, threaded_irq, FF input subsystem — none on Zephyr."
+    zephyr_port: ZephyrProject/Firmware/lib/haptics/src/da7280.c
+    port_coverage: "DRO mode only: WHO_AM_I + LRA period + voltage/IMAX/V2I calibration + TOP_CFG1 mode bits + TOP_CTL2 hot path."
+    deliberately_omitted: "PWM/RTWM/ETWM modes, waveform memory, BEMF/freq-track telemetry, FF effect upload."

@@ -11,3 +11,6 @@ target_sources(app PRIVATE
 
 # Shared BLE protocol header (attaches itself to `app`).
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../lib/ble ${CMAKE_BINARY_DIR}/_lib_ble)
+
+# Haptic stack: PCA9546A mux + 4× DA7280 + drive policy.
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../lib/haptics ${CMAKE_BINARY_DIR}/_lib_haptics)
