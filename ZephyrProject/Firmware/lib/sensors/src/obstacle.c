@@ -18,6 +18,17 @@ LOG_MODULE_REGISTER(hapnav_obstacle, LOG_LEVEL_INF);
 #define TOF_HALF_FOV_DEG         22.3f
 #define TOF_DEG_PER_ZONE         (2.0f * TOF_HALF_FOV_DEG / TOF_ROWS)
 
+/* The sensor is physically rolled by +45° around its optical axis: the
+ * original main diagonal (pixel (0,0)→(7,7)) becomes the world-frame
+ * horizontal line, so the four extreme directions (cardinal ±27.5°
+ * about each axis) line up with up/right/down/left. The pipeline mirrors
+ * the physical roll in software so the ray table stays accurate. */
+#define TOF_ROLL_DEG             45.0f
+
+/* After the roll the lateral extent is the *diagonal* of the original
+ * grid — ±27.5° horizontal — split evenly across the 4 urgency bins. */
+#define TOF_BIN_BOUNDARY_DEG     13.75f
+
 #define SENSOR_DOWNTILT_DEG      8.0f
 #define SENSOR_HEIGHT_M          1.35f
 #define USER_HEAD_ABOVE_SENSOR_M 0.40f         /* 1.75 m head − 1.35 m sensor */
@@ -46,8 +57,8 @@ LOG_MODULE_REGISTER(hapnav_obstacle, LOG_LEVEL_INF);
 
 /* ── State ────────────────────────────────────────────────────────────────── */
 
-static float   g_ray_B[HAPNAV_TOF_ZONES][3];   /* unit rays in body frame, tilt baked in */
-static uint8_t g_col_bin[TOF_COLS] = { 0, 0, 1, 1, 2, 2, 3, 3 };
+static float   g_ray_B[HAPNAV_TOF_ZONES][3];   /* unit rays in body frame, roll + tilt baked in */
+static uint8_t g_az_bin[HAPNAV_TOF_ZONES];     /* per-pixel azimuth bin after the 45° roll */
 
 static float g_accel_mag_hist[STATIONARY_WINDOW_FRAMES];
 static int   g_accel_hist_idx;
@@ -86,16 +97,26 @@ static void quat_to_R_WB(const float q[4], float R[3][3])
 }
 
 /*
- * Build the per-zone unit ray in body frame.
+ * Build the per-zone unit ray in body frame and the azimuth-bin LUT.
  *
  * Sensor frame (S):  +X right, +Y up, +Z forward (optical axis).
  * Body frame (B):    +X right, +Y back, +Z up — so -Y_B is "user forward".
- * No-tilt mapping S → B:  X_B = X_S, Y_B = -Z_S, Z_B = Y_S.
- * Then apply R_x(+θ) for downtilt: rotates the optical axis (-Y_B before
- * tilt) toward -Z_B, i.e. nose-down by θ.
+ *
+ * Order of operations:
+ *   1. raw (az, el) → unit ray in S (no roll, no tilt)
+ *   2. R_z(+TOF_ROLL_DEG) — sensor's own 45° optical-axis roll
+ *   3. S → B mapping:  X_B = X_S, Y_B = -Z_S, Z_B = Y_S
+ *   4. R_x(+SENSOR_DOWNTILT_DEG) about body X — nose-down pitch
+ *
+ * The post-rotation azimuth (in S after step 2) decides the 4-bin
+ * urgency lane each pixel feeds into; the world-frame classifier in
+ * hapnav_obstacle_step() independently rejects pixels that come back
+ * as floor or ceiling.
  */
 static void build_ray_table(void)
 {
+	const float cr = cosf(TOF_ROLL_DEG     * DEG2RAD);
+	const float sr = sinf(TOF_ROLL_DEG     * DEG2RAD);
 	const float ct = cosf(SENSOR_DOWNTILT_DEG * DEG2RAD);
 	const float st = sinf(SENSOR_DOWNTILT_DEG * DEG2RAD);
 
@@ -104,16 +125,21 @@ static void build_ray_table(void)
 			float az = (c - 3.5f) * TOF_DEG_PER_ZONE * DEG2RAD;
 			float el = (3.5f - r) * TOF_DEG_PER_ZONE * DEG2RAD;
 
-			float xs = sinf(az) * cosf(el);
-			float ys = sinf(el);
-			float zs = cosf(az) * cosf(el);
+			float xs0 = sinf(az) * cosf(el);
+			float ys0 = sinf(el);
+			float zs0 = cosf(az) * cosf(el);
 
-			/* S → B (no tilt) */
+			/* 2. Roll about optical axis: X' = Xc − Ys, Y' = Xs + Yc */
+			float xs = xs0 * cr - ys0 * sr;
+			float ys = xs0 * sr + ys0 * cr;
+			float zs = zs0;
+
+			/* 3. S → B (no tilt) */
 			float xb0 =  xs;
 			float yb0 = -zs;
 			float zb0 =  ys;
 
-			/* Apply downtilt R_x(+θ): Y' = Y·c − Z·s, Z' = Y·s + Z·c */
+			/* 4. R_x(+θ): Y' = Y·c − Z·s, Z' = Y·s + Z·c */
 			float xb = xb0;
 			float yb = yb0 * ct - zb0 * st;
 			float zb = yb0 * st + zb0 * ct;
@@ -122,6 +148,17 @@ static void build_ray_table(void)
 			g_ray_B[idx][0] = xb;
 			g_ray_B[idx][1] = yb;
 			g_ray_B[idx][2] = zb;
+
+			/* Post-roll sensor-frame azimuth selects the lateral bin.
+			 * atan2(X_S, Z_S) — independent of elevation and of
+			 * the subsequent body-frame mapping. */
+			float az_rot_deg = atan2f(xs, zs) * (180.0f / 3.14159265f);
+			uint8_t bin;
+			if      (az_rot_deg < -TOF_BIN_BOUNDARY_DEG) bin = 0;   /* LEFT  */
+			else if (az_rot_deg <  0.0f)                 bin = 1;   /* CL    */
+			else if (az_rot_deg <  TOF_BIN_BOUNDARY_DEG) bin = 2;   /* CR    */
+			else                                         bin = 3;   /* RIGHT */
+			g_az_bin[idx] = bin;
 		}
 	}
 }
@@ -138,8 +175,9 @@ void hapnav_obstacle_init(void)
 	memset(g_prev_nearest_mm, 0, sizeof(g_prev_nearest_mm));
 	memset(g_prev_valid,      0, sizeof(g_prev_valid));
 
-	LOG_INF("Obstacle pipeline ready (tilt %.1f deg, sensor %.2fm above floor)",
-		(double)SENSOR_DOWNTILT_DEG, (double)SENSOR_HEIGHT_M);
+	LOG_INF("Obstacle pipeline ready (roll %.0f°, tilt %.1f°, sensor %.2fm above floor)",
+		(double)TOF_ROLL_DEG, (double)SENSOR_DOWNTILT_DEG,
+		(double)SENSOR_HEIGHT_M);
 }
 
 void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
@@ -147,6 +185,8 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 			  const float   quat_wxyz[4],
 			  const float   gyro_radps[3],
 			  const float   accel_g[3],
+			  int16_t       head_distance_mm,
+			  int16_t       head_proximity_max_mm,
 			  float         dt_s,
 			  struct hapnav_obstacles *out)
 {
@@ -249,28 +289,22 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	for (int b = 0; b < 4; b++) {
 		int16_t min_r = -1;
 
-		for (int r = 0; r < TOF_ROWS; r++) {
-			for (int c = 0; c < TOF_COLS; c++) {
-				if (g_col_bin[c] != b) continue;
-				int idx = r * TOF_COLS + c;
-				if (cls[idx] != CLS_OBSTACLE) continue;
-				if (min_r < 0 || distances_mm[idx] < min_r) {
-					min_r = distances_mm[idx];
-				}
+		for (int i = 0; i < HAPNAV_TOF_ZONES; i++) {
+			if (g_az_bin[i] != b) continue;
+			if (cls[i] != CLS_OBSTACLE) continue;
+			if (min_r < 0 || distances_mm[i] < min_r) {
+				min_r = distances_mm[i];
 			}
 		}
 
 		if (min_r < 0) continue;
 
 		int support = 0;
-		for (int r = 0; r < TOF_ROWS; r++) {
-			for (int c = 0; c < TOF_COLS; c++) {
-				if (g_col_bin[c] != b) continue;
-				int idx = r * TOF_COLS + c;
-				if (cls[idx] != CLS_OBSTACLE) continue;
-				if (abs(distances_mm[idx] - min_r) <= CLUSTER_DELTA_MM) {
-					support++;
-				}
+		for (int i = 0; i < HAPNAV_TOF_ZONES; i++) {
+			if (g_az_bin[i] != b) continue;
+			if (cls[i] != CLS_OBSTACLE) continue;
+			if (abs(distances_mm[i] - min_r) <= CLUSTER_DELTA_MM) {
+				support++;
 			}
 		}
 		if (support >= MIN_CLUSTER_PIXELS) {
@@ -346,6 +380,16 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	bool dropoff = hapnav_dropoff_check(distances_mm, target_status,
 					    ray_W, SENSOR_HEIGHT_M);
 
+	/* ── 9. Head clearance from VL53L1X ───────────────────────────────── */
+
+	bool head_obstacle = false;
+	if (head_distance_mm > 0 &&
+	    head_proximity_max_mm > 0 &&
+	    head_distance_mm <= head_proximity_max_mm &&
+	    !yaw_slewing) {
+		head_obstacle = true;
+	}
+
 	/* ── Flags ───────────────────────────────────────────────────────── */
 
 	out->flags = 0;
@@ -354,4 +398,5 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	if (mostly_invalid) out->flags |= HAPNAV_OBS_FLAG_MOSTLY_INVALID;
 	if (yaw_slewing)    out->flags |= HAPNAV_OBS_FLAG_YAW_SLEWING;
 	if (dropoff)        out->flags |= HAPNAV_OBS_FLAG_DROPOFF;
+	if (head_obstacle)  out->flags |= HAPNAV_OBS_FLAG_HEAD_OBSTACLE;
 }

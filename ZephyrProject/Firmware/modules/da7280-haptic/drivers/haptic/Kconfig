@@ -1,0 +1,82 @@
+# Copyright (c) 2026 (Your Company)
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig HAPTIC_DA7280
+	bool "Renesas DA7280 haptic driver"
+	default y
+	depends on DT_HAS_DLG_DA7280_ENABLED
+	select I2C
+	select GPIO if $(dt_compat_any_has_prop,$(DT_COMPAT_DLG_DA7280),irq-gpios)
+	help
+	  Enable the driver for the Renesas (formerly Dialog) DA7280 haptic
+	  motor driver. Targets DRO mode for direct I2C amplitude control of
+	  an LRA or ERM.
+
+if HAPTIC_DA7280
+
+config HAPTIC_DA7280_INIT_PRIORITY
+	int "DA7280 init priority"
+	default 80
+	help
+	  Init priority. Must be after I2C and GPIO controllers
+	  (POST_KERNEL by default for those).
+
+config HAPTIC_DA7280_TOTAL_DRIVE_CAP
+	int "Total drive cap across all DA7280 instances"
+	default 200
+	range 0 1020
+	help
+	  Sum of |amplitude| across all DA7280 instances will be clamped to
+	  this value. Protects shared supply rails when driving multiple
+	  LRAs simultaneously. The maximum (4 * 255) is 1020 with
+	  acceleration disabled, or (4 * 127) = 508 with acceleration on.
+	  Set to 0 to disable the budget check (per-channel cap still
+	  applies).
+
+config HAPTIC_DA7280_SAFE_INIT
+	bool "Force INACTIVE / TOP_CTL2=0 at probe (brownout-safe init)"
+	default n
+	help
+	  When enabled, the driver writes TOP_CTL2 = 0 and forces OP_MODE
+	  to INACTIVE as the very first I2C transactions in init, before
+	  applying any configuration. This protects against the case where
+	  the host MCU resets (e.g. brownout) while the DA7280 keeps power
+	  and its registers persist with a non-zero amplitude.
+
+	  Linux does NOT do this -- the upstream driver relies on the
+	  chip's POR state, since on phone-class systems the SoC and the
+	  haptic chip power-cycle together. Embedded platforms where the
+	  DA7280 can survive a host reset should turn this on.
+
+config HAPTIC_DA7280_ALLOW_PWM_MODE
+	bool "Allow OPERATION_MODE = PWM"
+	default n
+	help
+	  Permit da7280_set_mode(DA7280_OP_PWM). PWM mode requires an
+	  external PWM signal on the DA7280's GPI_0/PWM pin in the range
+	  10-250 kHz; this driver does NOT generate that signal. Enable
+	  only if your application drives the pin from a separate PWM
+	  peripheral and you understand the duty-cycle interpretation
+	  changes between acceleration_en=0 and =1 (datasheet 5.2.5).
+
+config HAPTIC_DA7280_WORKQUEUE_STACK_SIZE
+	int "IRQ work handler stack size"
+	default 1024
+	help
+	  Stack size for the dedicated workqueue used to run the IRQ
+	  handler (which reads IRQ event registers over I2C and invokes
+	  the user callback).
+
+config HAPTIC_DA7280_USE_SYSTEM_WORKQUEUE
+	bool "Use the system workqueue for IRQ handling"
+	default n
+	help
+	  Use the Zephyr system workqueue instead of a dedicated one. Only
+	  enable if your application is sure no item on the system queue
+	  can stall the haptic fault handler.
+
+module = HAPTIC_DA7280
+module-str = DA7280
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # HAPTIC_DA7280

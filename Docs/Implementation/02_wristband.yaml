@@ -1,0 +1,172 @@
+project: HapNav
+component: Wristband
+status: Firmware v4 (DA7280 module driver + i2c-mux + selftest harness)
+
+architecture:
+  mcu: Seeed XIAO nRF52840
+  role: BLE Peripheral & Haptic Actuator
+  i2c_topology:
+    bus: i2c1 (P0.05 SCL = D5, P0.04 SDA = D4, 400 kHz, nordic,nrf-twi)
+    mux:
+      part: PCA9546A (driven by Zephyr's in-tree ti,tca9546a driver — the
+            binding header explicitly states it is compatible with NXP PCA9546A)
+      addr: 0x70
+      channels: 4
+      idle_disconnect: true   # mux drops all channels between transactions
+    actuators:
+      - { channel: 0, alias: hapnav-lra-l,  role: LEFT,         driver: DA7280 @ 0x4A, lra: G1040003D }
+      - { channel: 1, alias: hapnav-lra-cl, role: CENTER_LEFT,  driver: DA7280 @ 0x4A, lra: G1040003D }
+      - { channel: 2, alias: hapnav-lra-cr, role: CENTER_RIGHT, driver: DA7280 @ 0x4A, lra: G1040003D }
+      - { channel: 3, alias: hapnav-lra-r,  role: RIGHT,        driver: DA7280 @ 0x4A, lra: G1040003D }
+    notes:
+      - "Each mux channel is published as a virtual i2c bus; the four DA7280s
+         each have their own DT node at 0x4A on their own child bus, so the
+         haptics policy never touches the mux directly."
+      - "i2c-mux-idle-disconnect plus the chip-level safe-init prologue
+         eliminate the entire stuck-on failure mode."
+
+actuator_config:
+  motor: G1040003D (Jinlong LRA — 170 Hz resonance, 13.8 Ω, ~2.5 Vrms rated)
+  driver: DA7280 (Renesas)
+  mode: open_loop_LRA / DRO (I2C direct register override)
+  resonant_freq_hz: 170
+  v_nominal_uv: 2106000        # SparkFun defaultMotor() target — leaves headroom
+  v_absmax_uv: 2260000          # ditto
+  imax_ua: 165400               # ditto
+  impedance_uohm: 13800000
+  acceleration_en: true         # → 7-bit signed amplitude (max 127) at TOP_CTL2
+  rapid_stop_en: true
+  freq_track_en: false          # explicit per spec (open loop)
+  bemf_sense_en: false
+  per_channel_drive_cap: 60     # of 127 (~47 %) — keeps single-LRA current safe
+  policy_total_drive_cap: 150   # sum across 4 channels — proportional scaling
+  driver_total_drive_cap: 250   # CONFIG_HAPTIC_DA7280_TOTAL_DRIVE_CAP backstop;
+                                # sized just above 4 × per_channel_drive_cap
+                                # (240) so per-channel is the real ceiling.
+  rationale: "Driving four LRAs simultaneously near rated voltage browned out
+              the nRF in earlier testing. SparkFun's library uses 2.106 / 2.26
+              Vrms by default; we adopt that and add two stacked global caps
+              (policy-side proportional scaling, driver-side hard limit).
+              The v4 supply topology (BQ25185 → TPS62827 → mux+drivers) gives
+              the LRAs their own buck rail so the brownout failure mode that
+              shaped these caps cannot recur from the same root cause."
+
+driver:
+  source_of_truth: Zephyr out-of-tree module at
+                   ZephyrProject/Firmware/modules/da7280-haptic
+  registered_via: ZEPHYR_EXTRA_MODULES list-append in
+                  ZephyrProject/Firmware/wristband/CMakeLists.txt
+  layout:
+    - module.yml at zephyr/module.yml (cmake → drivers/haptic, dts_root → .)
+    - drivers/haptic/{da7280.c, CMakeLists.txt, Kconfig}
+    - dts/bindings/i2c/dlg,da7280.yaml
+    - include/zephyr/drivers/haptic/da7280.h
+  coverage:
+    - DT_DRV_COMPAT dlg_da7280 — proper Zephyr device-driver model
+    - per-instance config from device tree (one node per LRA)
+    - CHIP_REV detection (0xBA), full TOP_CFG1..5 setup, V2I calibration
+    - DRO mode hot path: TOP_CTL2 single-byte amplitude write
+    - operation-mode auto-toggle (INACTIVE↔DRO on amp 0↔nonzero)
+    - global drive budget across all instances
+    - IRQ workqueue (optional irq-gpios; we don't wire one)
+    - SAFE_INIT prologue: TOP_CTL2=0, OP_MODE=INACTIVE before any config
+    - polled IRQ_EVENT1 / IRQ_EVENT_WARNING_DIAG read+clear
+    - VDD ADC and CALIB_IMP readbacks for telemetry
+  intentionally_omitted_in_app:
+    - PWM mode (gated behind CONFIG_HAPTIC_DA7280_ALLOW_PWM_MODE; we don't enable)
+    - RTWM/ETWM sequence playback (driver supports it; policy doesn't use it)
+    - waveform-memory upload at probe (no mem image in DT)
+
+drive_pipeline:
+  inputs:
+    - hapnav_obstacles.urgency[4]    # uint8 per channel from pin
+    - hapnav_obstacles.flags         # STATIONARY | BLOCKED | INVALID | YAW_SLEW | DROPOFF
+    - hapnav_obstacles.nearest_range_mm
+  worker_rate_hz: 20
+  watchdog_ms: 250
+  stages:
+    1_latch:        "BLE write_no_response stores latest obstacles under mutex"
+    2_flag_gate:    "STATIONARY/BLOCKED/INVALID → all-zero target"
+    3a_dropoff:     "DROPOFF → 150 ms on / 150 ms off square-wave on all 4 channels"
+    3b_head:        "HEAD_OBSTACLE → 50 ms on / 50 ms off on outer pair only
+                     (LEFT + RIGHT); centre channels muted. 10 Hz pulse,
+                     perceptually distinct from drop-off."
+    4_yaw_dampen:   "YAW_SLEW → multiply target by 0.4"
+    5_curve:        "urgency<32 → 0; else linear map to [8..60]"
+    6_global_cap:   "if Σ targets > 150, scale all proportionally"
+    7_fatigue:      "5 s leaky bucket per channel — fills only while driving,
+                     leaks only while idle; >70 % duty → linear taper to 40 %"
+    8_rate_limit:   "±24 / tick → full-scale ramp ~250 ms"
+    9_drive:        "da7280_set_amplitude(dev, amp) — driver handles the mux"
+
+ble_protocol:
+  unchanged: true
+  consumed: ["timestamp_ms", "obstacles.urgency[4]", "obstacles.flags"]
+  ignored:  ["distances_mm[64]", "target_status[64]", "quat[4]"]
+  notes:
+    - "JSON debug print of full frame retained on UART for bring-up."
+    - "In selftest mode, BLE link stays up so JSON still streams, but
+       consume_frame() is a no-op — wristband does not react to obstacles."
+
+selftest:
+  enable_with: CONFIG_HAPNAV_SELFTEST=y (already set in prj.conf for bench builds)
+  thread: dedicated 2 KiB stack, prio K_PRIO_PREEMPT(8)
+  sequence:
+    T0_probe:                 "chip-rev, IRQ_STATUS1, ADC_VDD, CALIB_IMP per chip; clear stale events"
+    T1_channel_walk:          "drive each channel solo at 30/50/60, log post-drive IRQ_EVENT1"
+    T2_per_channel_ramp:      "0 → 60 → 0 in steps of 5 over ~1.5 s; log peak VDD"
+    T3_pairwise_crossfade:    "L↔CL, CL↔CR, CR↔R holding sum at 60 across 21 steps"
+    T4_all_on_stress:         "all 4 chips concurrently, amp 10 → 60 step 10 every 500 ms;
+                               bail on UVLO/OC/OVERTEMP/ACTUATOR fault"
+    T5_update_rate_stress:    "alternate 25↔45 on ch0 at 10/50/100/200/500 Hz for 2 s each;
+                               counts I2C errors and IRQ events per rate"
+    T6_dropoff_pattern:       "5 cycles of 150 ms-on / 150 ms-off on all 4 channels"
+    T7_simulated_obstacles:   "9 cases (single-side, center, wall, yaw-slew dampen,
+                               stationary mute, drop-off flag, head-obstacle flag,
+                               clear) — exercises full policy including the two
+                               override patterns"
+    T8_fatigue_taper:         "hold LEFT at urgency 220 for 8 s; logs amp + bucket every 1 s.
+                               At full bucket the taper coefficient is 102/256 (≈40 %),
+                               so amp[L] should descend from 50 → 38 → 19."
+    T9_watchdog_mute:         "burst 400 ms then 500 ms idle; PASS if cur_amp[]=0 after"
+    T10_idle_hold:            "5 s quiet, surveils IRQ_EVENT1 every second on all chips.
+                               Latched events from prior tests are cleared at T10 entry
+                               so we only report events that fire inside the idle window."
+  worker_handoff:
+    - "T0–T6 drive chips directly via da7280_set_amplitude(); the 20 Hz worker
+       is NOT scheduled during this phase, so it doesn't fight the test writes."
+    - "T7–T10 inject synthetic frames; the worker is started just before T7 and
+       evolves rate-limit / fatigue / watchdog state as it would in the field."
+
+source_layout:
+  - Firmware/modules/da7280-haptic/                   # out-of-tree Zephyr module
+  - Firmware/lib/haptics/include/hapnav/haptics.h
+  - Firmware/lib/haptics/src/haptics.c                # policy + selftest harness
+  - Firmware/lib/haptics/Kconfig                      # HAPNAV_HAPTICS, HAPNAV_SELFTEST
+  - Firmware/lib/haptics/CMakeLists.txt
+  - Firmware/wristband/src/main.c                     # calls hapnav_haptics_init() before BLE
+  - Firmware/wristband/src/ble.c                      # frame_write() → hapnav_haptics_consume_frame()
+  - Firmware/wristband/boards/xiao_ble.overlay        # i2c1 + tca9546a@70 + 4 DA7280 nodes
+  - Firmware/wristband/Kconfig                        # sources lib/haptics/Kconfig
+  - Firmware/wristband/prj.conf                       # I2C_TCA954X, HAPTIC_DA7280, HAPNAV_SELFTEST
+  - Firmware/wristband/CMakeLists.txt                 # ZEPHYR_EXTRA_MODULES → da7280-haptic
+
+build:
+  cmd: "cd ZephyrProject/Firmware/wristband && west build -b xiao_ble"
+  flash: "west flash"
+  selftest_default: "CONFIG_HAPNAV_SELFTEST=y in prj.conf — flip to =n for normal navigation"
+
+testing:
+  bench:
+    - "Boot with CONFIG_HAPNAV_SELFTEST=y → full T0–T10 sequence runs, log it via west monitor"
+    - "hapnav_haptics_inject() lets you script urgency patterns from any module"
+    - "print_frame_json() on UART confirms BLE arrival and obstacles content"
+  validation_checklist:
+    - "T0: every chip prints rev=0xBA"
+    - "T1: physically feel exactly one motor at a time, in order L → CL → CR → R"
+    - "T4: vdd readback stays >2.7 V (no UVLO) all the way to amp=60 on all 4 chips"
+    - "T5: 500 Hz rate column shows errs=0 (i.e. I2C keeps up)"
+    - "T7 'wall' case: cur_amp totals ~150 (proportional scaling pinned at the global cap)"
+    - "T8: amp[L] decays from 60 toward ~24 within 8 s as the leaky bucket fills"
+    - "T9: PASS line — silent within ~500 ms after burst stops"
+    - "T10: no spontaneous IRQ messages over 5 s"

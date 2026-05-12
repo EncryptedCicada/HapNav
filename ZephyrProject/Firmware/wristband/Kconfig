@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Application Kconfig — chains in subsystem Kconfigs so symbols like
+# CONFIG_HAPNAV_SELFTEST resolve through prj.conf and `west build` -DCONFIG_*.
+
+rsource "../lib/haptics/Kconfig"
+
+source "Kconfig.zephyr"

@@ -1,17 +1,51 @@
 /*
  * XIAO ESP32-S3 chest pin overlay.
  *
- * I2C devices on &i2c0 (SDA=GPIO5/D4, SCL=GPIO6/D5):
- *   - LSM6DSO  IMU          @ 0x6B (Sparkfun Qwiic default)
- *   - LIS2MDL  magnetometer @ 0x1E
- *   - VL53L5CX ToF array    @ 0x29  (added later)
- *   - VL53L1X  ToF L/R      @ 0x29  (XSHUT-shifted, added later)
+ * I2C devices on &i2c0 (SDA = D4/GPIO0_5, SCL = D5/GPIO0_6):
+ *   - LSM6DSO          IMU                @ 0x6B (Sparkfun Qwiic default)
+ *   - LIS2MDL          magnetometer       @ 0x1E
+ *   - VL53L5CX         8×8 ToF (forward)  @ 0x52/8-bit → moved to 0x54/8-bit
+ *                                                       at boot to free 0x29
+ *   - VL53L1X (head)   single-zone ToF    @ 0x29  (in-tree Zephyr driver)
+ *   - VL53L1X (height) single-zone ToF    @ <future, requires mux or
+ *                                            second XSHUT>
  *
- * The vendor STMicro driver is invoked from app code, not via a Zephyr
- * sensor binding, so no child nodes are required here — we just need the
- * bus enabled.
+ * Address conflict: both VL53L5CX and VL53L1X power on at 7-bit 0x29.
+ * Until we have a TCA9548A on the pin too, we sequence them with the
+ * VL53L1X's XSHUT pin (D2/GPIO0_3):
+ *
+ *   1. App pulls XSHUT low      → VL53L1X off-bus
+ *   2. App inits VL53L5CX at 0x29 and renames it to 0x2A (vendor ULD)
+ *   3. App releases the deferred Zephyr VL53L1X driver via device_init()
+ *      → driver pulls XSHUT high and probes at 0x29
+ *
+ * The Zephyr in-tree driver does not natively support runtime address
+ * change; the VL53L5CX ULD does, so we move that one. After a power-cycle
+ * the VL53L5CX boots back at 0x29 and the dance repeats.
+ *
+ * VL53L1X mounting: optical axis tilted +20° above world horizontal.
+ * Combined with the chest-pin's −8° downtilt that holds the VL53L5CX,
+ * the VL53L1X's mounting plane is +28° relative to the main pin face.
+ * Detection envelope at a 1.35 m sensor mount height catches doorframes
+ * (2.0–2.1 m) anywhere from ~1 m to ~2.5 m forward — see
+ * Docs/Implementation/09_head_clearance.md for the geometry.
  */
+
 &i2c0 {
 	status = "okay";
-	clock-frequency = <I2C_BITRATE_FAST>;  /* 400 kHz */
+	clock-frequency = <I2C_BITRATE_FAST>;	/* 400 kHz */
+
+	tof_head: vl53l1x@29 {
+		compatible = "st,vl53l1x";
+		reg = <0x29>;
+		status = "okay";
+		zephyr,deferred-init;
+		xshut-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;	/* D2 */
+	};
+};
+
+/ {
+	aliases {
+		hapnav-tof-head = &tof_head;
+	};
 };

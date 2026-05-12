@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# HapNav wristband haptic policy + selftest harness.
+
+menu "HapNav haptics"
+
+config HAPNAV_HAPTICS
+	bool "Enable wristband haptic stack"
+	default y
+	depends on HAPTIC_DA7280
+	help
+	  Enables the high-level haptic policy that maps the BLE obstacles
+	  report onto the four DA7280-driven LRAs.
+
+if HAPNAV_HAPTICS
+
+config HAPNAV_SELFTEST
+	bool "Run isolated DA7280 selftest sequence"
+	default n
+	help
+	  When enabled, the wristband does NOT react to incoming BLE frames.
+	  Instead it spawns a dedicated thread at boot that executes a
+	  comprehensive bench-test sequence on the four DA7280 channels:
+	  probe + telemetry, channel walk, ramps, crossfades, all-on
+	  stress, update-rate stress, drop-off pattern, simulated obstacle
+	  reactions, fatigue taper, watchdog mute, and idle-hold IRQ
+	  surveillance. BLE remains up so JSON frames still print on UART.
+
+config HAPNAV_SELFTEST_THREAD_STACK_SIZE
+	int "Selftest thread stack size"
+	default 2048
+	depends on HAPNAV_SELFTEST
+	help
+	  Stack size for the selftest runner thread. Tests issue a lot of
+	  printk()/LOG_INF() calls so stay generous.
+
+endif # HAPNAV_HAPTICS
+
+endmenu

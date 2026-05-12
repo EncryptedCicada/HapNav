@@ -1,64 +1,77 @@
+/*
+ * HapNav wristband haptic policy + selftest harness.
+ *
+ * The four DA7280s sit behind a TI/NXP TCA9546A mux that Zephyr exposes
+ * as four virtual i2c buses. Each DA7280 has its own DT node (alias
+ * hapnav-lra-{l,cl,cr,r}) and the in-tree mux driver handles channel
+ * selection transparently — this layer just calls da7280_set_amplitude()
+ * with a device handle.
+ *
+ * Two operating modes share the same code:
+ *
+ *   normal:    BLE frames → consume_frame() → latch → 20 Hz worker
+ *              → policy → da7280_set_amplitude() per channel.
+ *
+ *   selftest:  BLE frames are ignored; a dedicated thread executes a
+ *              comprehensive bench-test sequence (probes, channel walk,
+ *              ramps, crossfades, all-on stress, update-rate stress,
+ *              drop-off pattern, simulated obstacles, fatigue taper,
+ *              watchdog mute, idle-hold). The 20 Hz worker still runs
+ *              so simulated-obstacle tests exercise the full policy.
+ */
 #include <hapnav/haptics.h>
-#include <hapnav/da7280.h>
-#include <hapnav/pca9546a.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
-#include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/haptic/da7280.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/printk.h>
+
 #include <string.h>
 
 LOG_MODULE_REGISTER(hapnav_haptics, LOG_LEVEL_INF);
 
-/* ── Hardware topology ──────────────────────────────────────────────────── */
+/* ── Channel mapping ───────────────────────────────────────────────────── */
 
-#define MUX_ADDR        0x70   /* PCA9546A default                         */
-#define DRIVER_ADDR     DA7280_DEFAULT_ADDR
-
-/* Channel-to-mux-port mapping (per the user's wiring):
- *   urgency[0] LEFT          → mux ch 0
- *   urgency[1] CENTER-LEFT   → mux ch 1
- *   urgency[2] CENTER-RIGHT  → mux ch 2
- *   urgency[3] RIGHT         → mux ch 3
- */
 #define HAPTICS_NUM_CH  4
 
-/* ── Drive-policy tuning ────────────────────────────────────────────────── */
+enum { CH_L = 0, CH_CL = 1, CH_CR = 2, CH_R = 3 };
 
-/* 20 Hz drive update — twice the pin's sample rate, so we can run smoothing
- * and the drop-off pulse pattern on a stable clock independent of BLE jitter. */
+static const struct device *const lras[HAPTICS_NUM_CH] = {
+	DEVICE_DT_GET(DT_ALIAS(hapnav_lra_l)),
+	DEVICE_DT_GET(DT_ALIAS(hapnav_lra_cl)),
+	DEVICE_DT_GET(DT_ALIAS(hapnav_lra_cr)),
+	DEVICE_DT_GET(DT_ALIAS(hapnav_lra_r)),
+};
+
+static const char *const role[HAPTICS_NUM_CH] = {
+	"LEFT", "CENTER-LEFT", "CENTER-RIGHT", "RIGHT"
+};
+
+/* ── Drive-policy tuning ───────────────────────────────────────────────── */
+
+/* 20 Hz drive update — twice the pin's sample rate so smoothing, drop-off
+ * pulse, and fatigue evolve on a stable clock independent of BLE jitter. */
 #define DRIVE_PERIOD_MS         50
 
-/* If we haven't seen a frame in this long, gradually mute everything. The
- * pin samples at 10 Hz (100 ms), so 250 ms means ~2 missed frames. */
+/* If we haven't seen a frame in this long, mute everything. The pin
+ * samples at 10 Hz (100 ms), so 250 ms means ~2 missed frames. */
 #define WATCHDOG_MS             250
 
-/* Below this raw urgency, the channel is silent — keeps the wristband from
- * buzzing on faint clutter at the edge of perception. */
+/* Below this raw urgency, the channel is silent — keeps the wristband
+ * from buzzing on faint clutter at the edge of perception. */
 #define URGENCY_FLOOR           32
 
-/* Maximum amplitude written to TOP_CTL2 on a single channel. The chip
- * allows 127 in acceleration mode. We cap at 60 to keep individual-LRA
- * current draw well below the supply budget — even if a wall-shaped
- * obstacle yields high urgency on all four channels simultaneously,
- * the per-channel cap plus the global cap below keeps the wristband
- * from browning out. */
+/* Per-channel amplitude cap. Matches per-channel-drive-cap in the DT
+ * binding so the chip and the policy agree on the ceiling. */
 #define DRIVE_MAX               60
 
-/* Global cap on the SUM of all four channels' drive amplitudes. With
- * DRIVE_MAX=60 and 4 channels, the unconstrained worst case is 240;
- * we proportionally scale all channels down whenever the total wants
- * to exceed this budget, preserving directional ratios. The number
- * tracks the supply ceiling, not the chip's max drive. */
+/* Global cap on the SUM of the four channels' amplitudes. The driver
+ * also enforces CONFIG_HAPTIC_DA7280_TOTAL_DRIVE_CAP as a hard backstop;
+ * we scale proportionally here so directional ratios survive when the
+ * unconstrained sum would exceed the supply budget. */
 #define DRIVE_MAX_TOTAL         150
-
-/* Diagnostic: every DIAG_PERIOD_TICKS, read back one chip's actual
- * register state and log it alongside our shadow. Catches the case
- * where TOP_CTL2 writes silently aren't landing or the chip has
- * drifted into a fault state. Channel rotates each diagnostic round
- * so we sample all four every ~4 seconds. */
-#define DIAG_PERIOD_TICKS       20   /* 20 * 50 ms = 1 s */
 
 /* Below this amplitude the LRA doesn't reliably move — quantise to zero. */
 #define DRIVE_MIN_PERCEPT       8
@@ -66,26 +79,28 @@ LOG_MODULE_REGISTER(hapnav_haptics, LOG_LEVEL_INF);
 /* Per-tick rate limit: ramps a full-scale jump in ~5 ticks (250 ms). */
 #define RATE_LIMIT_PER_TICK     24
 
-/* While the user is turning, dampen drive rather than muting outright —
- * lets sudden close hits still register but avoids spurious slewing buzz. */
+/* While the user is turning, dampen drive rather than muting outright. */
 #define YAW_SLEW_GAIN_NUM       2
 #define YAW_SLEW_GAIN_DEN       5    /* 40 % */
 
-/* Drop-off pattern: 150 ms on / 150 ms off, all four channels in lock-step.
- * Distinct enough from normal proximity buzz that the user can tell a
- * cliff-edge apart from a wall.                                          */
-#define DROPOFF_HALF_TICKS      3    /* 3 * 50 ms                         */
+/* Drop-off pattern: 150 ms on / 150 ms off, all four channels in lock-step. */
+#define DROPOFF_HALF_TICKS      3    /* 3 * 50 ms                          */
 
-/* Fatigue model: a 5 s leaky bucket per channel. Above 70 % duty we start
- * attenuating linearly down to 40 % at full duty, encouraging the actuator
- * (and the wearer's mechanoreceptors) to recover. */
+/* Head-obstacle pattern: faster pulse than drop-off so the two cliff-edge
+ * cues stay perceptually distinct. 50 ms on / 50 ms off → 10 Hz on the
+ * outer (LEFT+RIGHT) channels only; centre channels are left muted so the
+ * "ducking" feel is associated with the bracketing pair. */
+#define HEAD_HALF_TICKS         1    /* 1 * 50 ms                          */
+
+/* Fatigue model: 5 s leaky bucket per channel. Above 70 % duty we taper
+ * linearly down to 40 % at full duty. */
 #define FATIGUE_WINDOW_MS       5000U
 #define FATIGUE_HIGH_NUM        7
 #define FATIGUE_HIGH_DEN        10   /* 0.70 */
 #define FATIGUE_FLOOR_NUM       2
 #define FATIGUE_FLOOR_DEN       5    /* 0.40 */
 
-/* ── State ──────────────────────────────────────────────────────────────── */
+/* ── State ────────────────────────────────────────────────────────────── */
 
 struct latch {
 	struct hapnav_obstacles obs;
@@ -94,8 +109,6 @@ struct latch {
 };
 
 static struct {
-	struct hapnav_pca9546a mux;
-	struct hapnav_da7280   drv[HAPTICS_NUM_CH];
 	bool                   ch_ok[HAPTICS_NUM_CH];
 	bool                   ready;
 
@@ -105,94 +118,43 @@ static struct {
 	uint8_t                cur_amp[HAPTICS_NUM_CH];
 	uint32_t               on_ms[HAPTICS_NUM_CH];   /* leaky-bucket fatigue */
 	uint8_t                dropoff_phase;
+	uint8_t                head_phase;
 	bool                   was_stale;
 
 	struct k_work_delayable tick;
 } g;
 
-/* ── Mux-aware driver helpers ───────────────────────────────────────────── */
-
-/*
- * Pattern (mirrors Adafruit's TCA9548A try_lock/unlock):
- *   1. select channel  → mux passes traffic to channel only
- *   2. do the chip work
- *   3. deselect all    → mux is dark; nothing on the upstream bus reaches
- *                        any downstream chip until the next select.
- *
- * The deselect is the safety net: if any later code (or stray noise on
- * the bus) ever ends up writing to 0x4A while a channel is "still on",
- * exactly one chip would react. With deselect, none does.
- */
+/* ── Per-channel drive helpers ────────────────────────────────────────── */
 
 static int drive_one(int ch, uint8_t amp)
 {
-	if (!g.ch_ok[ch]) return 0;
-	int err = hapnav_pca9546a_select(&g.mux, (uint8_t)ch);
-	if (err) return err;
-	err = hapnav_da7280_set_amplitude(&g.drv[ch], amp);
-	(void)hapnav_pca9546a_deselect_all(&g.mux);
-	return err;
-}
-
-static int silence_one(int ch)
-{
-	if (!g.ch_ok[ch]) return 0;
-	int err = hapnav_pca9546a_select(&g.mux, (uint8_t)ch);
-	if (err) return err;
-	err = hapnav_da7280_stop(&g.drv[ch]);
-	(void)hapnav_pca9546a_deselect_all(&g.mux);
-	return err;
-}
-
-static int rearm_one(int ch)
-{
-	if (!g.ch_ok[ch]) return 0;
-	int err = hapnav_pca9546a_select(&g.mux, (uint8_t)ch);
-	if (err) return err;
-	err = hapnav_da7280_resume(&g.drv[ch]);
-	(void)hapnav_pca9546a_deselect_all(&g.mux);
-	return err;
-}
-
-/*
- * Boot-time hardware diagnostic. Drives each motor solo, in order, at
- * a gentle amplitude. With a working mux you should physically feel
- * exactly one motor at a time, in the order printed. If you feel two
- * or more motors on a single channel, the mux is being bypassed.
- *
- * Three guards against the brownout-then-stuck-on failure mode:
- *   1. Low amplitude (~30 / 127, well under the LRA's rated current).
- *   2. Hard silence_one() between drives — INACTIVE mode halts the
- *      drive stage even if a transient i2c error would have left amp=0
- *      partially applied.
- *   3. rearm_one() afterwards so the chip is back in DRO mode, ready
- *      for the policy worker.
- *
- * Boot delay: 4 channels × (300 ms drive + 300 ms gap) ≈ 2.4 s.
- */
-static void haptics_channel_walk(void)
-{
-	static const char * const role[HAPTICS_NUM_CH] = {
-		"LEFT", "CENTER-LEFT", "CENTER-RIGHT", "RIGHT"
-	};
-	LOG_INF("haptics: channel walk -- one motor at a time");
-	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
-		if (!g.ch_ok[ch]) {
-			LOG_INF("  ch%d %s skipped (init failed)", ch, role[ch]);
-			continue;
-		}
-		LOG_INF("  ch%d %s on", ch, role[ch]);
-		(void)drive_one(ch, 30);
-		k_msleep(300);
-		LOG_INF("  ch%d %s off", ch, role[ch]);
-		(void)silence_one(ch);   /* INACTIVE -- hard halt */
-		k_msleep(300);
-		(void)rearm_one(ch);     /* back to DRO at amp=0 */
+	if (!g.ch_ok[ch]) {
+		return 0;
 	}
-	LOG_INF("haptics: channel walk done");
+	int err = da7280_set_amplitude(lras[ch], (int)amp);
+	if (err && err != -EBUSY) {
+		LOG_WRN("ch%d set_amplitude(%u) → %d", ch, amp, err);
+	}
+	return err;
 }
 
-/* ── Policy ─────────────────────────────────────────────────────────────── */
+/* ── Boot probe ───────────────────────────────────────────────────────── */
+
+static void probe_one(int ch)
+{
+	uint8_t rev = 0, status = 0;
+	uint32_t vdd = 0, imp = 0;
+
+	(void)da7280_read_chip_rev(lras[ch], &rev);
+	(void)da7280_get_status(lras[ch], &status);
+	(void)da7280_get_vdd_mv(lras[ch], &vdd);
+	(void)da7280_get_impedance_milliohm(lras[ch], &imp);
+
+	LOG_INF("  ch%d %-12s rev=0x%02x status=0x%02x vdd=%u mV imp=%u mΩ",
+		ch, role[ch], rev, status, vdd, imp);
+}
+
+/* ── Policy ───────────────────────────────────────────────────────────── */
 
 static uint8_t urgency_to_target(uint8_t u)
 {
@@ -220,34 +182,32 @@ static uint8_t apply_rate_limit(uint8_t cur, uint8_t target)
 
 static void update_fatigue(int ch)
 {
-	/* Linear leak: lose DRIVE_PERIOD_MS of accumulated on-time per tick,
-	 * so a fully-saturated bucket drains in FATIGUE_WINDOW_MS even with
-	 * zero drive. */
-	if (g.on_ms[ch] >= DRIVE_PERIOD_MS) {
-		g.on_ms[ch] -= DRIVE_PERIOD_MS;
-	} else {
-		g.on_ms[ch] = 0;
-	}
+	/* True leaky-bucket: fill while driving, leak only while idle. The
+	 * earlier "leak every tick + fill every tick when active" cancelled
+	 * to zero net at 100 % duty, so the bucket never climbed past one
+	 * tick worth and the taper never engaged. */
 	if (g.cur_amp[ch] > 0) {
 		g.on_ms[ch] += DRIVE_PERIOD_MS;
 		if (g.on_ms[ch] > FATIGUE_WINDOW_MS) {
 			g.on_ms[ch] = FATIGUE_WINDOW_MS;
 		}
+	} else if (g.on_ms[ch] >= DRIVE_PERIOD_MS) {
+		g.on_ms[ch] -= DRIVE_PERIOD_MS;
+	} else {
+		g.on_ms[ch] = 0;
 	}
 }
 
 static uint8_t apply_fatigue(int ch, uint8_t target)
 {
-	/* duty = on_ms / window in 8-bit fixed point. */
 	uint32_t duty_n = ((uint32_t)g.on_ms[ch] * 256U) / FATIGUE_WINDOW_MS;
 	uint32_t high_n = (256U * FATIGUE_HIGH_NUM) / FATIGUE_HIGH_DEN;
 	if (duty_n <= high_n) {
 		return target;
 	}
-	uint32_t over = duty_n - high_n;             /* 0..(256-high_n)         */
-	uint32_t span = 256U - high_n;               /* range over which we taper */
+	uint32_t over = duty_n - high_n;
+	uint32_t span = 256U - high_n;
 	uint32_t floor_n = (256U * FATIGUE_FLOOR_NUM) / FATIGUE_FLOOR_DEN;
-	/* k = 1 - over/span * (1 - floor); clamp at floor. */
 	uint32_t k_n = 256U - (over * (256U - floor_n)) / span;
 	if (k_n < floor_n) k_n = floor_n;
 	return (uint8_t)((target * k_n) / 256U);
@@ -267,17 +227,33 @@ static void compute_targets(const struct hapnav_obstacles *obs,
 				   HAPNAV_OBS_FLAG_MOSTLY_INVALID);
 	const bool slew = flags & HAPNAV_OBS_FLAG_YAW_SLEWING;
 	const bool drop = flags & HAPNAV_OBS_FLAG_DROPOFF;
+	const bool head = flags & HAPNAV_OBS_FLAG_HEAD_OBSTACLE;
 
 	if (drop) {
-		/* Tick the drop-off square wave; phase wraps every 2 halves. */
 		g.dropoff_phase = (uint8_t)((g.dropoff_phase + 1) %
 					    (2U * DROPOFF_HALF_TICKS));
 		uint8_t amp = (g.dropoff_phase < DROPOFF_HALF_TICKS) ? DRIVE_MAX : 0;
 		for (int i = 0; i < HAPTICS_NUM_CH; i++) target_out[i] = amp;
+		g.head_phase = 0;
 		return;
 	}
 
 	g.dropoff_phase = 0;
+
+	if (head) {
+		/* Fast pulse on outer pair (LEFT + RIGHT). Centre channels
+		 * stay muted — the bracketing feel is the cue to duck. */
+		g.head_phase = (uint8_t)((g.head_phase + 1) %
+					 (2U * HEAD_HALF_TICKS));
+		uint8_t amp = (g.head_phase < HEAD_HALF_TICKS) ? DRIVE_MAX : 0;
+		target_out[0] = amp;
+		target_out[1] = 0;
+		target_out[2] = 0;
+		target_out[3] = amp;
+		return;
+	}
+
+	g.head_phase = 0;
 
 	if (mute) {
 		memset(target_out, 0, HAPTICS_NUM_CH);
@@ -293,11 +269,6 @@ static void compute_targets(const struct hapnav_obstacles *obs,
 		target_out[i] = t;
 	}
 
-	/* Global drive cap. When a wall-shaped obstacle drives all four
-	 * channels high simultaneously, the unconstrained sum can exceed
-	 * what the wristband supply can deliver and brownout the nRF.
-	 * Scale all channels proportionally so directional ratios survive
-	 * but the total stays inside the budget. */
 	uint32_t total = (uint32_t)target_out[0] + target_out[1] +
 			 target_out[2] + target_out[3];
 	if (total > DRIVE_MAX_TOTAL) {
@@ -309,180 +280,507 @@ static void compute_targets(const struct hapnav_obstacles *obs,
 	}
 }
 
-/* ── Worker ─────────────────────────────────────────────────────────────── */
+/* ── Worker ───────────────────────────────────────────────────────────── */
 
-static void haptics_tick(struct k_work *work)
+static void worker_tick(struct k_work *work)
 {
-	ARG_UNUSED(work);
-	if (!g.ready) {
-		return;
-	}
-
-	struct hapnav_obstacles obs;
-	uint32_t rx_ms;
-	bool valid;
+	struct latch snap;
 
 	k_mutex_lock(&g.latch_lock, K_FOREVER);
-	obs   = g.latch.obs;
-	rx_ms = g.latch.rx_time_ms;
-	valid = g.latch.valid;
+	snap = g.latch;
 	k_mutex_unlock(&g.latch_lock);
 
-	const uint32_t now = k_uptime_get_32();
-	const bool stale = !valid || (now - rx_ms) > WATCHDOG_MS;
+	uint32_t now = k_uptime_get_32();
+	bool stale = !snap.valid || (now - snap.rx_time_ms) > WATCHDOG_MS;
 
-	/* Edge-triggered watchdog. Going stale puts every chip into
-	 * OPERATION_MODE = INACTIVE — zeroing TOP_CTL2 alone does not
-	 * reliably halt the LRA on the DA7280; the mode bit change is
-	 * what gates the drive stage. Coming back online re-arms each
-	 * chip into DRO mode at amplitude 0 so the next normal-path
-	 * write to TOP_CTL2 takes effect. */
 	if (stale && !g.was_stale) {
-		LOG_INF("BLE link stale — halting all motors (INACTIVE mode)");
+		LOG_INF("BLE link stale — halting all motors (INACTIVE)");
 		for (int i = 0; i < HAPTICS_NUM_CH; i++) {
-			int err = silence_one(i);
-			if (err) {
-				LOG_WRN("silence ch%d failed: %d", i, err);
-			}
+			(void)drive_one(i, 0);
 			g.cur_amp[i] = 0;
-			g.on_ms[i]   = 0;
+			g.on_ms[i] = 0;
 		}
 		g.was_stale = true;
-	} else if (!stale && g.was_stale) {
-		LOG_INF("BLE link active — re-arming motors (DRO mode)");
-		for (int i = 0; i < HAPTICS_NUM_CH; i++) {
-			int err = rearm_one(i);
-			if (err) {
-				LOG_WRN("rearm ch%d failed: %d", i, err);
-			}
-			g.cur_amp[i] = 0;
-		}
-		g.was_stale = false;
-	}
-
-	/* While stale, the chips are in INACTIVE mode. Don't bother
-	 * touching TOP_CTL2 — the driver would reject the write anyway
-	 * (set_amplitude requires dev->active). */
-	if (stale) {
-		k_work_reschedule(&g.tick, K_MSEC(DRIVE_PERIOD_MS));
-		return;
 	}
 
 	uint8_t target[HAPTICS_NUM_CH];
-	compute_targets(&obs, false, target);
+	compute_targets(&snap.obs, stale, target);
 
 	for (int i = 0; i < HAPTICS_NUM_CH; i++) {
-		uint8_t fat = apply_fatigue(i, target[i]);
-		uint8_t lim = apply_rate_limit(g.cur_amp[i], fat);
-
-		/* Always assert to the chip — even when lim hasn't changed.
-		 * A single transient i2c hiccup that we missed would otherwise
-		 * leave the chip's TOP_CTL2 out of sync with our shadow forever,
-		 * since the change-gate would never re-issue the write. 80
-		 * writes/sec at 400 kHz is ~1.6 % bus utilisation. */
-		int err = drive_one(i, lim);
-		if (err) {
-			LOG_WRN("drive ch%d failed: %d", i, err);
-			/* Still advance the shadow — if we keep the old value
-			 * the rate limit can't make progress and a stuck-on
-			 * channel never recovers. */
+		uint8_t fatigued = apply_fatigue(i, target[i]);
+		uint8_t next = apply_rate_limit(g.cur_amp[i], fatigued);
+		if (next != g.cur_amp[i]) {
+			(void)drive_one(i, next);
+			g.cur_amp[i] = next;
 		}
-		g.cur_amp[i] = lim;
 		update_fatigue(i);
 	}
 
-	k_work_reschedule(&g.tick, K_MSEC(DRIVE_PERIOD_MS));
+	if (!stale) {
+		g.was_stale = false;
+	}
+
+	k_work_schedule(&g.tick, K_MSEC(DRIVE_PERIOD_MS));
 }
 
-/* ── Init ───────────────────────────────────────────────────────────────── */
-
-int hapnav_haptics_init(void)
-{
-	const struct device *i2c = DEVICE_DT_GET(DT_NODELABEL(i2c1));
-	if (!device_is_ready(i2c)) {
-		LOG_ERR("i2c1 not ready");
-		return -ENODEV;
-	}
-
-	k_mutex_init(&g.latch_lock);
-	memset(&g.latch, 0, sizeof(g.latch));
-	memset(g.cur_amp, 0, sizeof(g.cur_amp));
-	memset(g.on_ms, 0, sizeof(g.on_ms));
-	g.was_stale = true;  /* No frame yet — boot in the same state we'd be
-	                      * after a watchdog mute, so the first arriving
-	                      * frame logs a clean "re-arming" transition. */
-
-	int err = hapnav_pca9546a_init(&g.mux, i2c, MUX_ADDR);
-	if (err) {
-		LOG_ERR("PCA9546A init failed: %d", err);
-		return err;
-	}
-
-	int ok_count = 0;
-	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
-		err = hapnav_pca9546a_select(&g.mux, (uint8_t)ch);
-		if (err) {
-			LOG_WRN("mux select ch%d failed: %d", ch, err);
-			g.ch_ok[ch] = false;
-			continue;
-		}
-		err = hapnav_da7280_init(&g.drv[ch], i2c, DRIVER_ADDR,
-					 &HAPNAV_DA7280_CFG_DEFAULT);
-		g.ch_ok[ch] = (err == 0);
-		if (err) {
-			LOG_WRN("DA7280 init ch%d failed: %d", ch, err);
-		} else {
-			ok_count++;
-		}
-	}
-	(void)hapnav_pca9546a_deselect_all(&g.mux);
-
-	if (ok_count == 0) {
-		LOG_ERR("No haptic drivers responded");
-		return -ENODEV;
-	}
-	LOG_INF("Haptics ready: %d/%d channels online", ok_count, HAPTICS_NUM_CH);
-
-	/* Diagnostic: with the mux deselected, is anything still answering
-	 * at the DA7280 address? A successful read here proves a chip is on
-	 * the upstream side of the mux — i.e., not isolated, regardless of
-	 * what we tell the mux to do. */
-	{
-		(void)hapnav_pca9546a_deselect_all(&g.mux);
-		uint8_t reg = 0x00, val = 0;
-		int probe = i2c_write_read(i2c, DRIVER_ADDR, &reg, 1, &val, 1);
-		if (probe == 0) {
-			LOG_ERR("DA7280 ANSWERED at 0x%02x with mux deselected — "
-				"a chip is on the upstream bus, not behind the "
-				"mux. Mux isolation is bypassed; all four chips "
-				"will respond in unison. Check that each DA7280 "
-				"is wired to its own mux channel output (not "
-				"daisy-chained on one channel).", DRIVER_ADDR);
-		} else {
-			LOG_INF("Mux isolation OK: nothing at 0x%02x when "
-				"deselected (probe=%d).", DRIVER_ADDR, probe);
-		}
-	}
-
-	g.ready = true;
-	haptics_channel_walk();
-	k_work_init_delayable(&g.tick, haptics_tick);
-	k_work_reschedule(&g.tick, K_MSEC(DRIVE_PERIOD_MS));
-	return 0;
-}
+/* ── Public API ──────────────────────────────────────────────────────── */
 
 void hapnav_haptics_consume_frame(const struct hapnav_frame *frame)
 {
-	if (!frame) return;
-	hapnav_haptics_inject(&frame->obstacles);
+	if (!g.ready || frame == NULL) {
+		return;
+	}
+#if defined(CONFIG_HAPNAV_SELFTEST)
+	/* Selftest mode ignores BLE-driven reactions; obstacles get their
+	 * stimulation from the selftest thread via inject() instead. */
+	(void)frame;
+	return;
+#else
+	k_mutex_lock(&g.latch_lock, K_FOREVER);
+	g.latch.obs = frame->obstacles;
+	g.latch.rx_time_ms = k_uptime_get_32();
+	g.latch.valid = true;
+	k_mutex_unlock(&g.latch_lock);
+#endif
 }
 
 void hapnav_haptics_inject(const struct hapnav_obstacles *obs)
 {
-	if (!obs) return;
+	if (!g.ready || obs == NULL) {
+		return;
+	}
 	k_mutex_lock(&g.latch_lock, K_FOREVER);
-	g.latch.obs        = *obs;
+	g.latch.obs = *obs;
 	g.latch.rx_time_ms = k_uptime_get_32();
-	g.latch.valid      = true;
+	g.latch.valid = true;
 	k_mutex_unlock(&g.latch_lock);
+}
+
+/* ── Selftest harness ────────────────────────────────────────────────── */
+
+#if defined(CONFIG_HAPNAV_SELFTEST)
+
+static void log_irq_events(int ch, const char *tag)
+{
+	uint8_t events = 0, warn = 0;
+
+	(void)da7280_get_and_clear_events(lras[ch], &events);
+	if (events & DA7280_FAULT_WARNING) {
+		(void)da7280_get_warnings(lras[ch], &warn);
+	}
+	if (events) {
+		LOG_WRN("  ch%d %-8s IRQ_EVENT1=0x%02x WARN=0x%02x",
+			ch, tag, events, warn);
+	} else {
+		LOG_INF("  ch%d %-8s IRQ_EVENT1=0x00", ch, tag);
+	}
+}
+
+/* T0: probe + telemetry + clear any stale latched events. */
+static void test0_probe(void)
+{
+	LOG_INF("");
+	LOG_INF("T0: probe + telemetry");
+	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+		if (!g.ch_ok[ch]) {
+			LOG_INF("  ch%d %-12s SKIPPED (init failed)", ch, role[ch]);
+			continue;
+		}
+		probe_one(ch);
+		log_irq_events(ch, "preclr");
+	}
+}
+
+/* T1: solo channel walk — drive each motor on its own at low/mid/high. */
+static void test1_channel_walk(void)
+{
+	static const uint8_t levels[] = { 30, 50, DRIVE_MAX };
+
+	LOG_INF("");
+	LOG_INF("T1: channel walk (solo, low→high)");
+	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+		if (!g.ch_ok[ch]) continue;
+		LOG_INF("  ch%d %s", ch, role[ch]);
+		for (size_t i = 0; i < ARRAY_SIZE(levels); i++) {
+			(void)drive_one(ch, levels[i]);
+			k_msleep(250);
+		}
+		(void)drive_one(ch, 0);
+		k_msleep(200);
+		log_irq_events(ch, "post");
+	}
+}
+
+/* T2: per-channel ramp 0→max→0 over ~1.5 s, with mid-ramp VDD readback. */
+static void test2_per_channel_ramp(void)
+{
+	LOG_INF("");
+	LOG_INF("T2: per-channel ramp (0→%d→0)", DRIVE_MAX);
+	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+		if (!g.ch_ok[ch]) continue;
+		uint32_t vdd_mid = 0;
+		for (int amp = 0; amp <= DRIVE_MAX; amp += 5) {
+			(void)drive_one(ch, (uint8_t)amp);
+			if (amp == DRIVE_MAX) {
+				(void)da7280_get_vdd_mv(lras[ch], &vdd_mid);
+			}
+			k_msleep(60);
+		}
+		for (int amp = DRIVE_MAX; amp >= 0; amp -= 5) {
+			(void)drive_one(ch, (uint8_t)amp);
+			k_msleep(60);
+		}
+		(void)drive_one(ch, 0);
+		LOG_INF("  ch%d %-12s peak vdd=%u mV", ch, role[ch], vdd_mid);
+		log_irq_events(ch, "post");
+		k_msleep(150);
+	}
+}
+
+/* T3: pairwise crossfade — keeps the sum at DRIVE_MAX while ramping
+ * one channel down and the next one up. Validates concurrent drive
+ * at the per-channel-cap boundary. */
+static void test3_pairwise_crossfade(void)
+{
+	static const int pairs[][2] = { {0, 1}, {1, 2}, {2, 3} };
+	static const int steps = 20;
+
+	LOG_INF("");
+	LOG_INF("T3: pairwise crossfade");
+	for (size_t p = 0; p < ARRAY_SIZE(pairs); p++) {
+		int a = pairs[p][0], b = pairs[p][1];
+		if (!g.ch_ok[a] || !g.ch_ok[b]) continue;
+		LOG_INF("  %s ↔ %s", role[a], role[b]);
+		for (int s = 0; s <= steps; s++) {
+			uint8_t va = (uint8_t)((DRIVE_MAX * (steps - s)) / steps);
+			uint8_t vb = (uint8_t)((DRIVE_MAX * s) / steps);
+			(void)drive_one(a, va);
+			(void)drive_one(b, vb);
+			k_msleep(40);
+		}
+		(void)drive_one(a, 0);
+		(void)drive_one(b, 0);
+		log_irq_events(a, "post-a");
+		log_irq_events(b, "post-b");
+		k_msleep(150);
+	}
+}
+
+/* T4: all-on stress — drive all 4 simultaneously, stepping the per-channel
+ * amplitude up by 10 every 500 ms. Bails on the first chip-side fault. */
+static void test4_all_on_stress(void)
+{
+	LOG_INF("");
+	LOG_INF("T4: all-on stress (4 channels concurrently)");
+	bool fault = false;
+	for (int amp = 10; amp <= DRIVE_MAX && !fault; amp += 10) {
+		for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+			(void)drive_one(ch, (uint8_t)amp);
+		}
+		k_msleep(500);
+		uint32_t vdd0 = 0;
+		(void)da7280_get_vdd_mv(lras[0], &vdd0);
+		LOG_INF("  amp=%2d  vdd[ch0]=%u mV", amp, vdd0);
+		for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+			uint8_t events = 0;
+			(void)da7280_get_and_clear_events(lras[ch], &events);
+			if (events & (DA7280_FAULT_UVLO |
+				      DA7280_FAULT_OVERTEMP_CRIT |
+				      DA7280_FAULT_OVERCURRENT |
+				      DA7280_FAULT_ACTUATOR)) {
+				LOG_ERR("  ch%d FAULT 0x%02x at amp=%d",
+					ch, events, amp);
+				fault = true;
+			}
+		}
+	}
+	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+		(void)drive_one(ch, 0);
+	}
+	k_msleep(150);
+	LOG_INF("T4: %s", fault ? "stopped on fault" : "passed full sweep");
+}
+
+/* T5: update-rate stress — issue alternating-amplitude writes to a
+ * single channel at increasing frequencies. Manufacturer constraint on
+ * TOP_CTL2 is essentially I2C bandwidth (no internal latching gate);
+ * this test confirms the chip + bus can keep up. We alternate between
+ * two non-zero amplitudes so the chip stays in DRO mode (avoid mode
+ * changes that go INACTIVE↔DRO at every step). */
+static void test5_update_rate_stress(void)
+{
+	static const int rates_hz[] = { 10, 50, 100, 200, 500 };
+	const int ch = CH_L;
+
+	LOG_INF("");
+	LOG_INF("T5: update-rate stress on %s (alt 25↔45)", role[ch]);
+	if (!g.ch_ok[ch]) {
+		LOG_INF("T5: skipped (ch0 not ready)");
+		return;
+	}
+	for (size_t r = 0; r < ARRAY_SIZE(rates_hz); r++) {
+		int hz = rates_hz[r];
+		int period_us = 1000000 / hz;
+		int n = hz * 2;       /* 2 s of toggling */
+		int errs = 0;
+		uint8_t toggle = 25;
+		uint32_t t0 = k_uptime_get_32();
+		for (int i = 0; i < n; i++) {
+			int e = da7280_set_amplitude(lras[ch],
+						     (int)toggle);
+			if (e && e != -EBUSY) errs++;
+			toggle = (toggle == 25) ? 45 : 25;
+			k_busy_wait(period_us);
+		}
+		uint32_t dt = k_uptime_get_32() - t0;
+		(void)drive_one(ch, 0);
+		uint8_t events = 0;
+		(void)da7280_get_and_clear_events(lras[ch], &events);
+		LOG_INF("  %4d Hz  n=%d  dt=%u ms  errs=%d  IRQ=0x%02x",
+			hz, n, dt, errs, events);
+		k_msleep(150);
+	}
+}
+
+/* T6: drop-off pattern — exercises the policy's square-wave path on
+ * all four channels. Bypasses the worker by driving directly so timing
+ * matches DROPOFF_HALF_TICKS exactly. */
+static void test6_dropoff_pattern(void)
+{
+	LOG_INF("");
+	LOG_INF("T6: drop-off square wave (all 4 channels)");
+	for (int cycle = 0; cycle < 5; cycle++) {
+		for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+			(void)drive_one(ch, DRIVE_MAX);
+		}
+		k_msleep(150);
+		for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+			(void)drive_one(ch, 0);
+		}
+		k_msleep(150);
+	}
+	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+		log_irq_events(ch, "post");
+	}
+}
+
+/* Inject helper: builds a synthetic obstacles struct and drops it in
+ * the latch. The 20 Hz worker picks it up on its next tick. */
+static void inject_pattern(uint8_t u_l, uint8_t u_cl,
+			   uint8_t u_cr, uint8_t u_r, uint8_t flags)
+{
+	struct hapnav_obstacles obs = {
+		.urgency = { u_l, u_cl, u_cr, u_r },
+		.nearest_range_mm = 500,
+		.flags = flags,
+	};
+	hapnav_haptics_inject(&obs);
+}
+
+static void log_cur_amps(const char *tag)
+{
+	LOG_INF("  %-22s amp=[%3u %3u %3u %3u]",
+		tag,
+		g.cur_amp[0], g.cur_amp[1], g.cur_amp[2], g.cur_amp[3]);
+}
+
+/* T7: simulated obstacle reactions — feed the policy worker realistic
+ * urgency patterns and observe the resulting per-channel amplitudes. */
+static void test7_simulated_obstacles(void)
+{
+	struct {
+		const char *desc;
+		uint8_t u[4];
+		uint8_t flags;
+		uint32_t hold_ms;
+	} cases[] = {
+		{ "obstacle on LEFT",         {220,   0,   0,   0}, 0, 800 },
+		{ "obstacle on RIGHT",        {  0,   0,   0, 220}, 0, 800 },
+		{ "obstacle CENTER (CL+CR)",  {  0, 200, 200,   0}, 0, 800 },
+		{ "wall (all 4 high)",        {220, 220, 220, 220}, 0, 800 },
+		{ "yaw slewing dampen",       {220, 220, 220, 220},
+		  HAPNAV_OBS_FLAG_YAW_SLEWING, 800 },
+		{ "stationary mute",          {220, 220, 220, 220},
+		  HAPNAV_OBS_FLAG_STATIONARY,  500 },
+		{ "drop-off flag",            {  0,   0,   0,   0},
+		  HAPNAV_OBS_FLAG_DROPOFF,     900 },
+		{ "head-obstacle flag",       {  0,   0,   0,   0},
+		  HAPNAV_OBS_FLAG_HEAD_OBSTACLE, 700 },
+		{ "clear field",              {  0,   0,   0,   0}, 0, 400 },
+	};
+
+	LOG_INF("");
+	LOG_INF("T7: simulated obstacle reactions");
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		LOG_INF("  case: %s", cases[i].desc);
+		uint32_t t_end = k_uptime_get_32() + cases[i].hold_ms;
+		while (k_uptime_get_32() < t_end) {
+			inject_pattern(cases[i].u[0], cases[i].u[1],
+				       cases[i].u[2], cases[i].u[3],
+				       cases[i].flags);
+			k_msleep(80);
+		}
+		log_cur_amps(cases[i].desc);
+	}
+	/* Quiet the policy before we leave the test. */
+	inject_pattern(0, 0, 0, 0, 0);
+	k_msleep(300);
+}
+
+/* T8: fatigue taper — hold one channel at high urgency and watch the
+ * amplitude attenuate as the leaky-bucket fills. */
+static void test8_fatigue_taper(void)
+{
+	LOG_INF("");
+	LOG_INF("T8: fatigue taper (LEFT held at high urgency for 8 s)");
+	uint32_t t_end = k_uptime_get_32() + 8000;
+	uint32_t next_log = k_uptime_get_32();
+	while (k_uptime_get_32() < t_end) {
+		inject_pattern(220, 0, 0, 0, 0);
+		uint32_t now = k_uptime_get_32();
+		if (now >= next_log) {
+			LOG_INF("  t=%u ms  amp[L]=%u  bucket=%u ms",
+				now - (t_end - 8000),
+				g.cur_amp[0], g.on_ms[0]);
+			next_log = now + 1000;
+		}
+		k_msleep(80);
+	}
+	inject_pattern(0, 0, 0, 0, 0);
+	k_msleep(500);
+}
+
+/* T9: watchdog mute — inject high urgency briefly, then stop and
+ * verify the worker brings everything to 0 within ~250 ms. */
+static void test9_watchdog_mute(void)
+{
+	LOG_INF("");
+	LOG_INF("T9: watchdog mute (no inject for 500 ms after burst)");
+	uint32_t t_end = k_uptime_get_32() + 400;
+	while (k_uptime_get_32() < t_end) {
+		inject_pattern(200, 0, 0, 200, 0);
+		k_msleep(80);
+	}
+	log_cur_amps("after burst");
+	k_msleep(500);
+	log_cur_amps("after 500 ms idle");
+	bool muted = (g.cur_amp[0] | g.cur_amp[1] |
+		      g.cur_amp[2] | g.cur_amp[3]) == 0;
+	LOG_INF("T9: %s", muted ? "PASS (all silent)" : "FAIL (still driving)");
+}
+
+/* T10: idle hold — leave everything quiet for 5 s and surveil
+ * IRQ_EVENT1 on each chip. Anything non-zero is a spontaneous fault. */
+static void test10_idle_hold(void)
+{
+	LOG_INF("");
+	LOG_INF("T10: idle hold (5 s, watching IRQ_EVENT1)");
+	/* Clear anything that prior heavy-drive tests latched (e.g. a
+	 * brief UVLO during the T9 burst) so we only report events that
+	 * fire spontaneously inside this idle window. */
+	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+		uint8_t scratch = 0;
+		(void)da7280_get_and_clear_events(lras[ch], &scratch);
+	}
+	for (int s = 0; s < 5; s++) {
+		k_msleep(1000);
+		for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+			uint8_t events = 0;
+			(void)da7280_get_and_clear_events(lras[ch], &events);
+			if (events) {
+				LOG_WRN("  t=%ds ch%d spontaneous IRQ 0x%02x",
+					s + 1, ch, events);
+			}
+		}
+	}
+	LOG_INF("T10: idle surveillance complete");
+}
+
+static void selftest_thread(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+
+	/* Boot delay so the first BLE adverts and the haptics init logs
+	 * have already drained the UART buffer. */
+	k_msleep(800);
+
+	LOG_INF("");
+	LOG_INF("════════════ HapNav haptics SELFTEST ════════════");
+
+	test0_probe();
+	test1_channel_walk();
+	test2_per_channel_ramp();
+	test3_pairwise_crossfade();
+	test4_all_on_stress();
+	test5_update_rate_stress();
+	test6_dropoff_pattern();
+
+	/* Hand the chips back to the policy worker for the simulated-input
+	 * phase. From here on, all drive writes go through the worker and
+	 * the selftest thread only injects synthetic obstacles. */
+	LOG_INF("");
+	LOG_INF("--- starting policy worker ---");
+	k_work_schedule(&g.tick, K_MSEC(DRIVE_PERIOD_MS));
+
+	test7_simulated_obstacles();
+	test8_fatigue_taper();
+	test9_watchdog_mute();
+	test10_idle_hold();
+
+	LOG_INF("");
+	LOG_INF("════════════ selftest complete ════════════");
+	LOG_INF("BLE remains up; consume_frame() is a no-op in selftest mode.");
+	LOG_INF("Use west monitor to scrape the log; reset the board to rerun.");
+}
+
+K_THREAD_STACK_DEFINE(selftest_stack, CONFIG_HAPNAV_SELFTEST_THREAD_STACK_SIZE);
+static struct k_thread selftest_tcb;
+
+#endif /* CONFIG_HAPNAV_SELFTEST */
+
+/* ── Init ─────────────────────────────────────────────────────────────── */
+
+int hapnav_haptics_init(void)
+{
+	int ready_count = 0;
+
+	k_mutex_init(&g.latch_lock);
+	k_work_init_delayable(&g.tick, worker_tick);
+
+	for (int ch = 0; ch < HAPTICS_NUM_CH; ch++) {
+		if (!device_is_ready(lras[ch])) {
+			LOG_ERR("ch%d %s not ready", ch, role[ch]);
+			g.ch_ok[ch] = false;
+			continue;
+		}
+		g.ch_ok[ch] = true;
+		ready_count++;
+		probe_one(ch);
+	}
+
+	if (ready_count == 0) {
+		LOG_ERR("No DA7280 channels initialised — aborting");
+		return -ENODEV;
+	}
+
+	g.ready = true;
+
+#if defined(CONFIG_HAPNAV_SELFTEST)
+	LOG_INF("haptics: SELFTEST mode (%d/%d channels ready)",
+		ready_count, HAPTICS_NUM_CH);
+	(void)k_thread_create(&selftest_tcb, selftest_stack,
+			      K_THREAD_STACK_SIZEOF(selftest_stack),
+			      selftest_thread, NULL, NULL, NULL,
+			      K_PRIO_PREEMPT(8), 0, K_NO_WAIT);
+	k_thread_name_set(&selftest_tcb, "hapnav_selftest");
+	/* The worker is started later (from inside the selftest thread,
+	 * just before T7) so the raw-chip phase isn't fighting periodic
+	 * "stale → drive 0" writes from the worker. */
+#else
+	LOG_INF("haptics: %d/%d channels ready, worker @ %d Hz",
+		ready_count, HAPTICS_NUM_CH, 1000 / DRIVE_PERIOD_MS);
+	k_work_schedule(&g.tick, K_MSEC(DRIVE_PERIOD_MS));
+#endif
+
+	return 0;
 }

@@ -46,6 +46,9 @@ struct hapnav_obstacles {
 #define HAPNAV_OBS_FLAG_MOSTLY_INVALID (1U << 2)  /* open space / out of rng*/
 #define HAPNAV_OBS_FLAG_YAW_SLEWING    (1U << 3)  /* user turning head/body */
 #define HAPNAV_OBS_FLAG_DROPOFF        (1U << 4)  /* floor disappearing     */
+#define HAPNAV_OBS_FLAG_HEAD_OBSTACLE  (1U << 5)  /* VL53L1X sees a head-   *
+                                                   * level obstacle inside *
+                                                   * the clearance envelope*/
 
 /*
  * Combined per-sample frame, 219 bytes packed.

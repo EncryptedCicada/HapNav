@@ -1,0 +1,6 @@
+name: da7280-haptic
+build:
+  cmake: drivers/haptic
+  kconfig: drivers/haptic/Kconfig
+  settings:
+    dts_root: .

@@ -7,10 +7,21 @@ hits.
 
 ## Logic
 
-For each pixel in the bottom rows, the module knows the world-frame ray
-(from the same pre-computed table the obstacle pipeline uses) and the
-predicted distance at which that ray should intersect the floor plane
-`Z = -1.20 m`.
+For each pixel that looks at least ~11.5° below horizontal in world
+frame, the module knows the world-frame ray (from the same
+pre-computed table the obstacle pipeline uses) and the predicted
+distance at which that ray should intersect the floor plane
+`Z = −1.20 m`.
+
+The pipeline applies a +45° optical-axis roll to the VL53L5CX rays
+before this module sees them. The detector is **rotation-invariant** —
+it uses each ray's world-frame Z component, not the pixel's grid
+position — so the eligible "floor rays" are now the lower triangle of
+the diamond (corner pixel pointing straight down, plus its neighbours).
+The corner pixel strikes the floor at ~1.89 m forward instead of the
+unrotated bottom-row's 2.31 m; the detection envelope is therefore
+slightly closer-in but compensated by the wider lateral spread of
+floor rays across the diamond's bottom half.
 
 A pixel votes for drop-off if either:
 

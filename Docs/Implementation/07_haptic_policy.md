@@ -32,15 +32,31 @@ Before honoring `urgency[]` at all:
 | Flag | Action |
 |------|--------|
 | `STATIONARY` ∨ `SENSOR_BLOCKED` ∨ `MOSTLY_INVALID` | mute (target = 0) |
-| `DROPOFF` | drop-off pattern (stage 3); urgency ignored |
+| `DROPOFF` | drop-off pattern (stage 3a); urgency ignored |
+| `HEAD_OBSTACLE` | head-obstacle pattern (stage 3b) — outer pair, fast pulse; urgency ignored |
 | `YAW_SLEWING` | dampen target × 0.4 |
 
-### 3. Drop-off pattern
+Priority when multiple flags fire: drop-off > head-obstacle > urgency.
+Falling outranks bumping; bumping outranks brushing.
+
+### 3a. Drop-off pattern
 
 When `DROPOFF` is set, all four channels are driven in lock-step:
-3 ticks at `DRIVE_MAX`, 3 ticks at 0 (~150 ms / 150 ms square wave).
-This deliberately uses a coordination pattern that normal direction-coded
-output never produces, so the user can disambiguate cliff from wall.
+3 ticks at `DRIVE_MAX`, 3 ticks at 0 (~150 ms / 150 ms square wave,
+≈ 3.3 Hz). This deliberately uses a coordination pattern that normal
+direction-coded output never produces, so the user can disambiguate
+cliff from wall.
+
+### 3b. Head-obstacle pattern
+
+When `HEAD_OBSTACLE` is set (and `DROPOFF` is not), only the **outer
+pair** of LRAs (LEFT + RIGHT) pulse at `DRIVE_MAX`, alternating
+1 tick on / 1 tick off (~50 ms / 50 ms, **10 Hz**). The centre
+channels stay quiet. The bracketing fast pulse is perceptually
+distinct from the slower all-four drop-off pattern and from any
+direction-graded urgency, so the user reads it as "duck" rather than
+"stop" or "veer". The flag also defers to yaw-slew (the pin
+suppresses it on its end during head turns).
 
 ### 4. Urgency curve
 
@@ -50,9 +66,11 @@ urgency = u, u ≥ 32    → DRIVE_MAX × (u-32)/(255-32)
 result < 8             → 0      (LRA dead-band)
 ```
 
-`DRIVE_MAX` is **110 / 127** (≈ 87 %). The DA7280 in DRO mode with
-acceleration enabled treats `TOP_CTL2` as 7-bit signed; the 110 cap keeps
-sustained drive below the spec max for thermal headroom.
+`DRIVE_MAX` is **60 / 127** (≈ 47 %). The DA7280 in DRO mode with
+acceleration enabled treats `TOP_CTL2` as 7-bit signed; the 60 cap
+matches the DT `per-channel-drive-cap` on each VL53L1X-adjacent DA7280
+instance and keeps four LRAs at simultaneous full drive well inside
+the BQ25185 LOAD pin budget on the wristband's dedicated buck rail.
 
 ### 5. Fatigue (per channel)
 
@@ -79,12 +97,15 @@ enough that genuine "obstacle just appeared" still reads as urgent.
 For each channel whose limited amplitude differs from last tick:
 
 ```
-mux_select(channel)        # PCA9546A bit[ch]
-i2c_write TOP_CTL2 = amp   # DA7280 DRO mode
+da7280_set_amplitude(lras[ch], amp);
 ```
 
-I2C writes are skipped when the amplitude is unchanged, so a steady
-state (say, all-zero) costs zero I2C traffic.
+The four `lras[]` are device handles resolved from DT aliases
+(`hapnav-lra-l/cl/cr/r`). Zephyr's in-tree `ti,tca9546a` mux driver
+silently selects the right child bus before every I²C transaction, so
+this layer never touches the PCA9546A directly. I²C writes are
+skipped at the policy layer when the amplitude is unchanged, so a
+steady state (say, all-zero) costs zero I²C traffic.
 
 ## Safety
 
@@ -103,11 +124,13 @@ All policy knobs live as `#define`s at the top of `haptics.c`:
 DRIVE_PERIOD_MS         50      # worker tick
 WATCHDOG_MS             250
 URGENCY_FLOOR           32      # below this → silent
-DRIVE_MAX               110     # cap (out of 127)
+DRIVE_MAX               60      # per-channel cap (out of 127)
+DRIVE_MAX_TOTAL         150     # policy-side sum-cap; proportional scaling
 DRIVE_MIN_PERCEPT       8       # drive below this → 0
 RATE_LIMIT_PER_TICK     24
 YAW_SLEW_GAIN_NUM/DEN   2/5     # 40 % during head turns
 DROPOFF_HALF_TICKS      3       # 3 × 50 ms = 150 ms half-period
+HEAD_HALF_TICKS         1       # 1 × 50 ms = 50 ms half-period (10 Hz)
 FATIGUE_WINDOW_MS       5000
 FATIGUE_HIGH_NUM/DEN    7/10    # taper above 70 % duty
 FATIGUE_FLOOR_NUM/DEN   2/5     # taper bottoms at 40 %

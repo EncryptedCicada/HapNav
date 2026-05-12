@@ -1,24 +1,111 @@
 /*
  * Board overlay for Seeed XIAO nRF52840 (haptic wristband).
  *
- * I2C topology (on the XIAO's Qwiic-compatible D4/D5 header → SoC i2c1):
- *   i2c1 ──┬── PCA9546A 4-channel mux @ 0x70
- *          ├── ch0 → DA7280 @ 0x4A   (LEFT,         outer-left LRA)
- *          ├── ch1 → DA7280 @ 0x4A   (CENTER-LEFT,  inner-left LRA)
- *          ├── ch2 → DA7280 @ 0x4A   (CENTER-RIGHT, inner-right LRA)
- *          └── ch3 → DA7280 @ 0x4A   (RIGHT,        outer-right LRA)
+ * I2C topology (XIAO Qwiic header → SoC i2c1):
+ *   i2c1 ── tca9546a@70 (NXP PCA9546A-compatible mux)
+ *           ├── ch0 → DA7280 @ 0x4A   LEFT
+ *           ├── ch1 → DA7280 @ 0x4A   CENTER-LEFT
+ *           ├── ch2 → DA7280 @ 0x4A   CENTER-RIGHT
+ *           └── ch3 → DA7280 @ 0x4A   RIGHT
  *
- * All four DA7280s share the same 7-bit address — they're isolated by the
- * mux. We don't declare per-driver child nodes here because the haptics
- * module talks to the bus directly (mirrors the pin's sensor pattern);
- * only the bus itself needs config.
+ * The four DA7280s share the same 7-bit I2C address; the mux isolates
+ * them. Zephyr's `ti,tca9546a` driver (binding header note: "compatible
+ * with NXP PCA9546A") publishes each channel as a virtual i2c bus, so
+ * each DA7280 lives at 0x4A on its own child bus and the rest of the
+ * stack never has to touch the mux directly.
  *
- * `i2c1` is the bus the xiao_ble board file routes to D4 (SDA / P0.04) and
- * D5 (SCL / P0.05) — the standard Qwiic pinout for this board. The board
- * common dtsi already enables it and assigns pinctrl, so this overlay just
- * raises the bus rate to 400 kHz.
+ * `i2c-mux-idle-disconnect` makes the mux drop all channels between
+ * transactions — the safety net that prevents a stray write to 0x4A on
+ * the parent bus from reaching any actuator.
+ *
+ * `i2c1` is the bus the xiao_ble board file routes to D4 (SDA) / D5 (SCL).
+ * The board common dtsi already enables it and assigns pinctrl, so this
+ * overlay just raises the bus rate and hangs the mux off it.
  */
 
 &i2c1 {
-	clock-frequency = <I2C_BITRATE_FAST>;  /* 400 kHz */
+	clock-frequency = <I2C_BITRATE_FAST>;	/* 400 kHz */
+	status = "okay";
+
+	mux: tca9546a@70 {
+		compatible = "ti,tca9546a";
+		reg = <0x70>;
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		i2c-mux-idle-disconnect;
+
+		mux_ch0: mux_i2c@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			lra_l: da7280@4a {
+				compatible = "dlg,da7280";
+				reg = <0x4a>;
+				dlg,actuator-type = "LRA";
+				dlg,resonant-freq-hz = <170>;
+				dlg,acc-enable;
+				dlg,rapid-stop-enable;
+				per-channel-drive-cap = <60>;
+			};
+		};
+
+		mux_ch1: mux_i2c@1 {
+			reg = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			lra_cl: da7280@4a {
+				compatible = "dlg,da7280";
+				reg = <0x4a>;
+				dlg,actuator-type = "LRA";
+				dlg,resonant-freq-hz = <170>;
+				dlg,acc-enable;
+				dlg,rapid-stop-enable;
+				per-channel-drive-cap = <60>;
+			};
+		};
+
+		mux_ch2: mux_i2c@2 {
+			reg = <2>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			lra_cr: da7280@4a {
+				compatible = "dlg,da7280";
+				reg = <0x4a>;
+				dlg,actuator-type = "LRA";
+				dlg,resonant-freq-hz = <170>;
+				dlg,acc-enable;
+				dlg,rapid-stop-enable;
+				per-channel-drive-cap = <60>;
+			};
+		};
+
+		mux_ch3: mux_i2c@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			lra_r: da7280@4a {
+				compatible = "dlg,da7280";
+				reg = <0x4a>;
+				dlg,actuator-type = "LRA";
+				dlg,resonant-freq-hz = <170>;
+				dlg,acc-enable;
+				dlg,rapid-stop-enable;
+				per-channel-drive-cap = <60>;
+			};
+		};
+	};
+};
+
+/ {
+	aliases {
+		hapnav-lra-l  = &lra_l;
+		hapnav-lra-cl = &lra_cl;
+		hapnav-lra-cr = &lra_cr;
+		hapnav-lra-r  = &lra_r;
+	};
 };

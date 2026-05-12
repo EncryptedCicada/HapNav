@@ -1,0 +1,234 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Renesas/Dialog DA7280 haptic driver (LRA / ERM).
+#
+# This binding exposes the DRO-mode subset relevant for direct-I2C amplitude
+# control of an LRA. PWM/RTWM/ETWM modes are not handled by the Zephyr driver.
+
+description: |
+  Dialog/Renesas DA7280 haptic motor driver. Drives a single LRA or ERM
+  via I2C in Direct Register Override (DRO) mode.
+
+  Property names follow the upstream Linux binding
+  (Documentation/devicetree/bindings/input/dlg,da7280.txt) so that DT
+  fragments can be ported between Linux and Zephyr with minimal changes.
+
+  Acceleration mode changes the meaning of the amplitude register
+  (TOP_CTL2): when on, it is a 7-bit signed value with magnitude up to 127;
+  when off, an 8-bit unsigned value up to 255. The driver clamps writes
+  according to the configured mode.
+
+compatible: "dlg,da7280"
+
+include: i2c-device.yaml
+
+properties:
+  irq-gpios:
+    type: phandle-array
+    description: |
+      Optional GPIO pin connected to the DA7280 IRQ output. When present,
+      the driver enables interrupt-driven fault handling (OC, UVLO, actuator
+      fault, overtemp, sequence fault). On a serious fault the driver forces
+      the channel back to INACTIVE and invokes the user callback.
+      The DA7280 IRQ pin is open-drain active-low; configure it accordingly
+      in the consumer node (typically GPIO_ACTIVE_LOW | GPIO_PULL_UP).
+      In the upstream Linux binding this is expressed via 'interrupts-extended'
+      instead -- Zephyr uses 'irq-gpios' by convention.
+
+  dlg,actuator-type:
+    type: string
+    default: "LRA"
+    enum:
+      - "LRA"
+      - "ERM-bar"
+      - "ERM-coin"
+    description: Motor type. Determines TOP_CFG1.ACTUATOR_TYPE and ERM-only quirks.
+
+  dlg,nom-microvolt:
+    type: int
+    default: 2106000
+    description: |
+      Nominal RMS drive voltage in microvolts. Encoded into ACTUATOR1 at
+      23.4 mV/LSB using Linux's rounding-up rule
+      (code = uV / 23400 + 1, capped at 0xFF). Default 2.106 V is the
+      SparkFun defaultMotor() target for the Jinlong G1040003D LRA;
+      with Linux encoding this writes 0x5B (2.129 V actual).
+
+  dlg,abs-max-microvolt:
+    type: int
+    default: 2260000
+    description: |
+      Absolute maximum drive voltage in microvolts. Encoded as
+      code = uV / 23400 + 1.
+
+  dlg,imax-microamp:
+    type: int
+    default: 165400
+    description: |
+      Maximum drive current in microamps. Encoded into ACTUATOR3.IMAX as
+      a 5-bit code: code = (uA - 28600) / 7200 + 1, range 28.6 mA - 252.6 mA.
+
+  dlg,impd-micro-ohms:
+    type: int
+    default: 13800000
+    description: |
+      Actuator coil impedance in micro-ohms. Used together with imax to
+      compute the V2I calibration factor (CALIB_V2I_H/L). Default 13.8 ohm
+      for the G1040003D LRA.
+
+  dlg,resonant-freq-hz:
+    type: int
+    default: 170
+    description: |
+      LRA resonant frequency in hertz (integer; matches upstream Linux
+      binding). Encoded as period count = 1e9 / (freq_hz * 1333) against
+      the chip's nominal 750 kHz reference; high byte goes to FRQ_LRA_PER_H,
+      low 7 bits to FRQ_LRA_PER_L.
+
+  dlg,acc-enable:
+    type: boolean
+    description: |
+      Enable active acceleration (TOP_CFG1.ACCELERATION_EN). Changes the
+      interpretation of TOP_CTL2 to 7-bit signed (max magnitude 127) and
+      enables V2I_FACTOR_OFFSET correction in TOP_CFG5.
+
+  dlg,rapid-stop-enable:
+    type: boolean
+    description: Enable rapid-stop braking (TOP_CFG1.RAPID_STOP_EN).
+
+  dlg,freq-track-enable:
+    type: boolean
+    description: |
+      Enable closed-loop frequency tracking (TOP_CFG1.FREQ_TRACK_EN).
+      Leave absent if the actuator's mechanical mounting could prevent
+      the tracker from reaching resonance (causes E_ACTUATOR_FAULT).
+
+  dlg,bemf-sens-enable:
+    type: boolean
+    description: Enable BEMF sensing (TOP_CFG1.BEMF_SENSE_EN).
+
+  dlg,amp-pid-enable:
+    type: boolean
+    description: Enable amplitude PID closed loop (TOP_CFG1.AMP_PID_EN).
+
+  per-channel-drive-cap:
+    type: int
+    default: 127
+    description: |
+      Zephyr-driver-specific per-instance amplitude clamp applied in
+      da7280_set_amplitude(). Range 0-127 (acceleration mode) or 0-255
+      (no acceleration). Driver clamps |amplitude| to this value before
+      any global budget check. Default 127 = no clamp in accel mode.
+
+  full-brake-thr:
+    type: int
+    default: 0
+    description: |
+      Full-brake threshold (TOP_CFG2[3:0], 0-15). 0 disables full-brake.
+
+  bemf-fault-limit:
+    type: int
+    default: 1
+    description: |
+      BEMF fault limit (TOP_INT_CFG1[1:0]). 0 = disabled, 1 = 4.9 mV,
+      2 = 27.9 mV, 3 = 49.9 mV. Default 1 matches chip POR. Forced to 0
+      when actuator-type is "ERM-coin".
+
+  vdd-margin:
+    type: int
+    default: 3
+    description: |
+      VDD margin (TOP_CFG3[3:0]) for automatic output limiting; 187.5 mV
+      per LSB. Caps the drive voltage to (VDD - margin), preventing the
+      regulator from clipping when the supply sags. Default 3 = 562.5 mV
+      (matches chip POR).
+
+  dlg,embedded-mode:
+    type: boolean
+    description: |
+      Set TOP_CFG1.EMBEDDED_MODE: chip auto-clears its own faults and will
+      attempt to drive again on the next request without host intervention.
+      Useful for headless / no-host setups.
+
+  dlg,standby-after-drive:
+    type: boolean
+    description: |
+      Sets TOP_CTL1.STANDBY_EN to keep the chip in low-latency STANDBY
+      between drives instead of dropping to IDLE (lower power but ~5x
+      higher start-up latency). Linux always sets this during init and
+      clears it on close; we expose it as a static DT choice.
+
+  dlg,ps-seq-id:
+    type: int
+    default: 0
+    description: |
+      Pre-stored sequence ID (SEQ_CTL2[3:0], 0-15) selected for I2C
+      sequence triggering in RTWM mode.
+
+  dlg,ps-seq-loop:
+    type: int
+    default: 0
+    description: |
+      Pre-stored sequence loop count (SEQ_CTL2[7:4], 0-15). Number of
+      additional repeats; 0 = play once, 15 = play 16 times.
+
+  dlg,gpi0-seq-id:
+    type: int
+    default: 0
+    description: GPI_0 sequence ID (GPI_0_CTL[6:3], 0-15).
+
+  dlg,gpi0-mode:
+    type: string
+    default: "Single-pattern"
+    enum: ["Single-pattern", "Multi-pattern"]
+    description: GPI_0 single/multi-pattern selection.
+
+  dlg,gpi0-polarity:
+    type: string
+    default: "Rising-edge"
+    enum: ["Rising-edge", "Falling-edge", "Both-edge"]
+    description: GPI_0 edge selection.
+
+  dlg,gpi1-seq-id:
+    type: int
+    default: 1
+    description: GPI_1 sequence ID (GPI_1_CTL[6:3], 0-15).
+
+  dlg,gpi1-mode:
+    type: string
+    default: "Single-pattern"
+    enum: ["Single-pattern", "Multi-pattern"]
+    description: GPI_1 single/multi-pattern selection.
+
+  dlg,gpi1-polarity:
+    type: string
+    default: "Rising-edge"
+    enum: ["Rising-edge", "Falling-edge", "Both-edge"]
+    description: GPI_1 edge selection.
+
+  dlg,gpi2-seq-id:
+    type: int
+    default: 2
+    description: GPI_2 sequence ID (GPI_2_CTL[6:3], 0-15).
+
+  dlg,gpi2-mode:
+    type: string
+    default: "Single-pattern"
+    enum: ["Single-pattern", "Multi-pattern"]
+    description: GPI_2 single/multi-pattern selection.
+
+  dlg,gpi2-polarity:
+    type: string
+    default: "Rising-edge"
+    enum: ["Rising-edge", "Falling-edge", "Both-edge"]
+    description: GPI_2 edge selection.
+
+  dlg,mem-array:
+    type: uint8-array
+    description: |
+      Optional 100-byte waveform memory image, formatted per datasheet
+      section 5.8 (header with snippet/sequence counts and end-pointers
+      followed by snippet PWL data and sequence frames). When present,
+      the driver uploads this image to the chip after configuration.
+      Sized matches upstream Linux dlg,mem-array but expressed as bytes
+      directly here rather than as 32-bit cells.
