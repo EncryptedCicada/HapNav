@@ -110,15 +110,52 @@ void setup() {
 
   // 2. Initialize BLE scanner
 
-  Bluefruit.begin(0, 1);
+  // Bluefruit.begin(0, 1);
 
-  Bluefruit.Scanner.setRxCallback(scan_callback);
+  // Bluefruit.Scanner.setRxCallback(scan_callback);
 
-  Bluefruit.Scanner.setInterval(200, 150);
+  // Bluefruit.Scanner.setInterval(200, 150);
 
-  Bluefruit.Scanner.useActiveScan(true);
+  // Bluefruit.Scanner.useActiveScan(true);
 
-  Bluefruit.Scanner.start(0);
+  // Bluefruit.Scanner.start(0);
+
+
+
+  selectMuxChannel(0);       // Select channel 0
+
+  hapDrive.setVibrate(100);   // Set vibration intensity (max 127)
+
+  delay(200);                // Vibrate for 200 ms
+
+  hapDrive.setVibrate(0);    // Stop vibration
+
+
+  selectMuxChannel(1);       // Select channel 1
+
+  hapDrive.setVibrate(100);   // Set vibration intensity (max 127)
+
+  delay(200);                // Vibrate for 200 ms
+
+  hapDrive.setVibrate(0);    // Stop vibration
+
+
+  selectMuxChannel(2);       // Select channel 2
+
+  hapDrive.setVibrate(100);   // Set vibration intensity (max 127)
+
+  delay(200);                // Vibrate for 200 ms
+
+  hapDrive.setVibrate(0);    // Stop vibration
+
+
+  selectMuxChannel(3);       // Select channel 3
+
+  hapDrive.setVibrate(100);   // Set vibration intensity (max 127)
+
+  delay(200);                // Vibrate for 200 ms
+
+  hapDrive.setVibrate(0);    // Stop vibration
 
 }
 
