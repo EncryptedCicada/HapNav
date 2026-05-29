@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# HapNav pin-side sensor pipeline knobs.
+
+menu "HapNav sensors"
+
+config HAPNAV_DROPOFF
+	bool "Run the drop-off (cliff) detector"
+	default y
+	help
+	  Toggles the world-frame floor-strike check that raises
+	  HAPNAV_OBS_FLAG_DROPOFF when the ToF rays that "should hit floor"
+	  return either invalid status or a slant range much further than
+	  the predicted floor intercept.
+
+	  Disable (=n) for bench-demo builds where the physical geometry
+	  doesn't match the worn pose that bench mode assumes — most rays
+	  will then look forward across the desk into the room beyond, and
+	  the detector will fire DROPOFF on essentially every frame.
+
+	  The wristband's DROPOFF override (the all-4 square wave) takes
+	  precedence over the urgency pulses, so a stuck-on drop-off
+	  cue blocks the lateral-obstacle demo. With this disabled,
+	  HAPNAV_OBS_FLAG_DROPOFF is never set, the override doesn't fire,
+	  and the wristband shows urgency-driven pulses cleanly.
+
+config HAPNAV_HEAD_TOF
+	bool "Enable the head-clearance VL53L1X sensor"
+	default y
+	help
+	  When disabled (=n), pin_sensors_init() skips device_init() on the
+	  VL53L1X and pin_sensors_sample() leaves head_distance_mm = -1
+	  permanently. The HAPNAV_OBS_FLAG_HEAD_OBSTACLE flag is therefore
+	  never raised, and the wristband never sees the head-clearance
+	  pattern.
+
+	  XSHUT is still pulled low at boot regardless of this option, so a
+	  VL53L1X that's physically wired and powered stays in reset and
+	  can't contend with the VL53L5CX at 0x29.
+
+	  Useful for bench demos where the VL53L5CX alone is wide enough
+	  (±22.3° per axis) to cover the 10–20 cm working volume.
+
+config HAPNAV_BENCH_MODE
+	bool "Bench-demo geometry (sensor sits on a desk)"
+	default n
+	help
+	  Compresses the obstacle / drop-off / head-clearance distance
+	  constants so the full pipeline can be exercised on a desktop with
+	  the chest pin standing UPRIGHT on a desk — the VL53L5CX optical
+	  centre then sits ~ 1–2 cm above the surface and grazes along it —
+	  and objects moved within a 10–50 cm envelope.
+
+	  Concretely:
+	    SENSOR_HEIGHT_M         1.35 m → 0.015 m
+	    FLOOR_BAND_HIGH_M      -1.20 m → -0.005 m  (desk plane = floor)
+	    HEAD_TOP_BAND_M         0.40 m → 0.10 m
+	    MIN_RANGE_MM             300   →   50
+	    MAX_RANGE_MM            3000   →  500
+	    CLUSTER_DELTA_MM         200   →   30
+	    HEAD_PROXIMITY_MAX_MM   2200   →  150
+	    dropoff predicted-range  3.5 m →  0.5 m
+	    STATIONARY var threshold raised so the resting pin doesn't mute
+	    everything (the worn pin's natural body sway re-enables it for
+	    free in real-world builds).
+
+	  Disable for the worn / real-world build. CONFIG_HAPNAV_BENCH_MODE
+	  is loud at boot (the obstacle pipeline init log calls it out) so
+	  it should be obvious from a UART capture which mode a binary was
+	  built in.
+
+config HAPNAV_HABITUATION
+	bool "Fade alerts for obstacles stationary relative to the pin"
+	default y
+	help
+	  Per azimuth bin, an obstacle whose nearest range holds within a
+	  small deadband is treated as stationary w.r.t. the pin and its
+	  urgency decays toward a floor over ~2-3 s, so a parked obstacle
+	  stops nagging. Any range change beyond the deadband (the object
+	  moved, or the pin moved toward/away from it) snaps urgency back
+	  to full.
+
+	  Disable (=n) to alert on every in-range obstacle regardless of
+	  motion — useful for A/B comparison. The deadband, decay rate and
+	  floor are compile-time constants in obstacle.c; HABIT_DEADBAND_MM
+	  is the main sensitivity knob (wider = less sensitive to small
+	  movements).
+
+endmenu

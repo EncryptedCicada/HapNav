@@ -63,23 +63,25 @@ static const char *const role[HAPTICS_NUM_CH] = {
  * from buzzing on faint clutter at the edge of perception. */
 #define URGENCY_FLOOR           32
 
-/* Per-channel amplitude cap. Matches per-channel-drive-cap in the DT
- * binding so the chip and the policy agree on the ceiling. */
+/* Per-channel maximum amplitude (the per-channel-drive-cap in the DT
+ * binding). Intensity is encoded in amplitude: urgency maps linearly into
+ * [DRIVE_MIN_PERCEPT, DRIVE_MAX] and that becomes the strength of a knock. */
 #define DRIVE_MAX               60
 
-/* Global cap on the SUM of the four channels' amplitudes. The driver
- * also enforces CONFIG_HAPTIC_DA7280_TOTAL_DRIVE_CAP as a hard backstop;
- * we scale proportionally here so directional ratios survive when the
- * unconstrained sum would exceed the supply budget. */
-#define DRIVE_MAX_TOTAL         150
-
-/* Below this amplitude the LRA doesn't reliably move — quantise to zero. */
+/* Below this urgency-derived intensity, the channel is silent. */
 #define DRIVE_MIN_PERCEPT       8
 
-/* Per-tick rate limit: ramps a full-scale jump in ~5 ticks (250 ms). */
-#define RATE_LIMIT_PER_TICK     24
+/* Knock rhythm: a short hard tap (KNOCK_ON_TICKS) then a gap, repeating at a
+ * fixed cadence (KNOCK_PERIOD_TICKS). Proximity rides on the *amplitude* of
+ * each tap (graded from urgency), not the rate — a closer obstacle knocks
+ * harder, not faster. A single global knock clock keeps every channel
+ * tapping in unison, so direction reads as a left/right strength difference
+ * within one knock instead of an out-of-phase stutter. */
+#define KNOCK_ON_TICKS          1    /* 50 ms tap                          */
+#define KNOCK_PERIOD_TICKS      7    /* 350 ms cycle ≈ 2.9 knocks/s        */
 
-/* While the user is turning, dampen drive rather than muting outright. */
+/* While the user is turning, dampen drive rather than muting outright by
+ * scaling the target amplitude down to 40 %. */
 #define YAW_SLEW_GAIN_NUM       2
 #define YAW_SLEW_GAIN_DEN       5    /* 40 % */
 
@@ -92,8 +94,11 @@ static const char *const role[HAPTICS_NUM_CH] = {
  * "ducking" feel is associated with the bracketing pair. */
 #define HEAD_HALF_TICKS         1    /* 1 * 50 ms                          */
 
-/* Fatigue model: 5 s leaky bucket per channel. Above 70 % duty we taper
- * linearly down to 40 % at full duty. */
+/* Fatigue model: 5 s leaky bucket per channel that fills while the channel
+ * is driven (amplitude > 0) and leaks while idle. Above 70 % bucket fill we
+ * attenuate the target amplitude down to a 40 % floor, so a sustained
+ * obstacle swells to full, then eases back as the bucket saturates — the
+ * cue stays present but stops nagging at full intensity. */
 #define FATIGUE_WINDOW_MS       5000U
 #define FATIGUE_HIGH_NUM        7
 #define FATIGUE_HIGH_DEN        10   /* 0.70 */
@@ -115,8 +120,9 @@ static struct {
 	struct k_mutex         latch_lock;
 	struct latch           latch;
 
-	uint8_t                cur_amp[HAPTICS_NUM_CH];
-	uint32_t               on_ms[HAPTICS_NUM_CH];   /* leaky-bucket fatigue */
+	uint8_t                cur_amp[HAPTICS_NUM_CH];     /* last drive value */
+	uint32_t               on_ms[HAPTICS_NUM_CH];      /* leaky-bucket fatigue */
+	uint8_t                knock_phase;                 /* global knock clock */
 	uint8_t                dropoff_phase;
 	uint8_t                head_phase;
 	bool                   was_stale;
@@ -169,17 +175,6 @@ static uint8_t urgency_to_target(uint8_t u)
 	return (uint8_t)scaled;
 }
 
-static uint8_t apply_rate_limit(uint8_t cur, uint8_t target)
-{
-	int d = (int)target - (int)cur;
-	if (d >  RATE_LIMIT_PER_TICK) d =  RATE_LIMIT_PER_TICK;
-	if (d < -RATE_LIMIT_PER_TICK) d = -RATE_LIMIT_PER_TICK;
-	int next = (int)cur + d;
-	if (next < 0)   next = 0;
-	if (next > DRIVE_MAX) next = DRIVE_MAX;
-	return (uint8_t)next;
-}
-
 static void update_fatigue(int ch)
 {
 	/* True leaky-bucket: fill while driving, leak only while idle. The
@@ -213,19 +208,34 @@ static uint8_t apply_fatigue(int ch, uint8_t target)
 	return (uint8_t)((target * k_n) / 256U);
 }
 
-static void compute_targets(const struct hapnav_obstacles *obs,
-			    bool stale, uint8_t target_out[HAPTICS_NUM_CH])
+/* Drive one channel to `want` (0 or DRIVE_MAX) only if it differs from
+ * the last issued value, and remember it. Keeps redundant I2C writes
+ * off the wire — without this, every tick of a long gap would re-issue
+ * `set_amplitude(0)`. */
+static void drive_step(int ch, uint8_t want)
+{
+	if (want != g.cur_amp[ch]) {
+		(void)drive_one(ch, want);
+		g.cur_amp[ch] = want;
+	}
+}
+
+/* Override patterns: drop-off, head-obstacle, mute, stale. Each owns
+ * the drive entirely for the tick and the urgency pulse path is
+ * skipped. Returns true if an override took effect. */
+static bool apply_override(const struct hapnav_obstacles *obs, bool stale)
 {
 	if (stale) {
-		memset(target_out, 0, HAPTICS_NUM_CH);
-		return;
+		for (int i = 0; i < HAPTICS_NUM_CH; i++) {
+			drive_step(i, 0);
+		}
+		return true;
 	}
 
 	const uint8_t flags = obs->flags;
 	const bool mute = flags & (HAPNAV_OBS_FLAG_STATIONARY |
 				   HAPNAV_OBS_FLAG_SENSOR_BLOCKED |
 				   HAPNAV_OBS_FLAG_MOSTLY_INVALID);
-	const bool slew = flags & HAPNAV_OBS_FLAG_YAW_SLEWING;
 	const bool drop = flags & HAPNAV_OBS_FLAG_DROPOFF;
 	const bool head = flags & HAPNAV_OBS_FLAG_HEAD_OBSTACLE;
 
@@ -233,32 +243,46 @@ static void compute_targets(const struct hapnav_obstacles *obs,
 		g.dropoff_phase = (uint8_t)((g.dropoff_phase + 1) %
 					    (2U * DROPOFF_HALF_TICKS));
 		uint8_t amp = (g.dropoff_phase < DROPOFF_HALF_TICKS) ? DRIVE_MAX : 0;
-		for (int i = 0; i < HAPTICS_NUM_CH; i++) target_out[i] = amp;
+		for (int i = 0; i < HAPTICS_NUM_CH; i++) {
+			drive_step(i, amp);
+		}
 		g.head_phase = 0;
-		return;
+		return true;
 	}
-
 	g.dropoff_phase = 0;
 
 	if (head) {
-		/* Fast pulse on outer pair (LEFT + RIGHT). Centre channels
-		 * stay muted — the bracketing feel is the cue to duck. */
 		g.head_phase = (uint8_t)((g.head_phase + 1) %
 					 (2U * HEAD_HALF_TICKS));
-		uint8_t amp = (g.head_phase < HEAD_HALF_TICKS) ? DRIVE_MAX : 0;
-		target_out[0] = amp;
-		target_out[1] = 0;
-		target_out[2] = 0;
-		target_out[3] = amp;
-		return;
+		uint8_t outer = (g.head_phase < HEAD_HALF_TICKS) ? DRIVE_MAX : 0;
+		drive_step(0, outer);
+		drive_step(1, 0);
+		drive_step(2, 0);
+		drive_step(3, outer);
+		return true;
 	}
-
 	g.head_phase = 0;
 
 	if (mute) {
-		memset(target_out, 0, HAPTICS_NUM_CH);
-		return;
+		for (int i = 0; i < HAPTICS_NUM_CH; i++) {
+			drive_step(i, 0);
+		}
+		return true;
 	}
+
+	return false;
+}
+
+/* Per-channel knock: every channel taps on the same global clock, each at
+ * its own urgency-derived amplitude (yaw-dampened, fatigue-attenuated). The
+ * tap is abrupt — no slewing — so it reads as a discrete knock whose
+ * strength encodes proximity. */
+static void apply_urgency_knocks(const struct hapnav_obstacles *obs)
+{
+	const bool slew = obs->flags & HAPNAV_OBS_FLAG_YAW_SLEWING;
+
+	g.knock_phase = (uint8_t)((g.knock_phase + 1) % KNOCK_PERIOD_TICKS);
+	bool fire = (g.knock_phase < KNOCK_ON_TICKS);
 
 	for (int i = 0; i < HAPTICS_NUM_CH; i++) {
 		uint8_t t = urgency_to_target(obs->urgency[i]);
@@ -266,17 +290,9 @@ static void compute_targets(const struct hapnav_obstacles *obs,
 			t = (uint8_t)(((uint32_t)t * YAW_SLEW_GAIN_NUM) /
 				      YAW_SLEW_GAIN_DEN);
 		}
-		target_out[i] = t;
-	}
-
-	uint32_t total = (uint32_t)target_out[0] + target_out[1] +
-			 target_out[2] + target_out[3];
-	if (total > DRIVE_MAX_TOTAL) {
-		for (int i = 0; i < HAPTICS_NUM_CH; i++) {
-			target_out[i] = (uint8_t)
-				(((uint32_t)target_out[i] * DRIVE_MAX_TOTAL) /
-				 total);
-		}
+		uint8_t amp = apply_fatigue(i, t);
+		drive_step(i, fire ? amp : 0);
+		update_fatigue(i);
 	}
 }
 
@@ -298,26 +314,37 @@ static void worker_tick(struct k_work *work)
 		for (int i = 0; i < HAPTICS_NUM_CH; i++) {
 			(void)drive_one(i, 0);
 			g.cur_amp[i] = 0;
-			g.on_ms[i] = 0;
+			g.on_ms[i]   = 0;
 		}
+		g.knock_phase = 0;
 		g.was_stale = true;
 	}
 
-	uint8_t target[HAPTICS_NUM_CH];
-	compute_targets(&snap.obs, stale, target);
-
-	for (int i = 0; i < HAPTICS_NUM_CH; i++) {
-		uint8_t fatigued = apply_fatigue(i, target[i]);
-		uint8_t next = apply_rate_limit(g.cur_amp[i], fatigued);
-		if (next != g.cur_amp[i]) {
-			(void)drive_one(i, next);
-			g.cur_amp[i] = next;
-		}
-		update_fatigue(i);
+	if (!apply_override(&snap.obs, stale)) {
+		apply_urgency_knocks(&snap.obs);
 	}
 
 	if (!stale) {
 		g.was_stale = false;
+	}
+
+	/* Drive-state trace, throttled to ~ 5 Hz so the log stays readable
+	 * (20 Hz worker tick / 4 = 5 Hz). Shows the current obstacles input
+	 * the worker is reacting to, the per-channel drive level (0 or
+	 * DRIVE_MAX with pulses), the pulse-phase counters, and the fatigue
+	 * bucket fill — the four numbers that fully describe what the
+	 * policy is doing right now. */
+	static uint8_t trace_div;
+	if (++trace_div >= 4) {
+		trace_div = 0;
+		const struct hapnav_obstacles *o = &snap.obs;
+		printk("DRIVE urg=[%u %u %u %u] flags=0x%02x stale=%d "
+		       "amp=[%u %u %u %u] bucket=[%u %u %u %u]\n",
+		       o->urgency[0], o->urgency[1], o->urgency[2], o->urgency[3],
+		       (unsigned)o->flags, (int)stale,
+		       g.cur_amp[0], g.cur_amp[1], g.cur_amp[2], g.cur_amp[3],
+		       (unsigned)g.on_ms[0], (unsigned)g.on_ms[1],
+		       (unsigned)g.on_ms[2], (unsigned)g.on_ms[3]);
 	}
 
 	k_work_schedule(&g.tick, K_MSEC(DRIVE_PERIOD_MS));

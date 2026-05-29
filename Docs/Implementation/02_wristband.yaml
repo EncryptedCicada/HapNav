@@ -84,20 +84,29 @@ drive_pipeline:
     - hapnav_obstacles.nearest_range_mm
   worker_rate_hz: 20
   watchdog_ms: 250
+  model: "Short hard pulses, not graded amplitude. Each channel fires a
+          1-tick (50 ms) hit at DRIVE_MAX; intensity is encoded purely as
+          pulse rate. Confirmed perceptually most distinct on the SparkFun
+          + G1040003D stack during qualitative bench testing."
   stages:
     1_latch:        "BLE write_no_response stores latest obstacles under mutex"
-    2_flag_gate:    "STATIONARY/BLOCKED/INVALID → all-zero target"
-    3a_dropoff:     "DROPOFF → 150 ms on / 150 ms off square-wave on all 4 channels"
-    3b_head:        "HEAD_OBSTACLE → 50 ms on / 50 ms off on outer pair only
-                     (LEFT + RIGHT); centre channels muted. 10 Hz pulse,
-                     perceptually distinct from drop-off."
-    4_yaw_dampen:   "YAW_SLEW → multiply target by 0.4"
-    5_curve:        "urgency<32 → 0; else linear map to [8..60]"
-    6_global_cap:   "if Σ targets > 150, scale all proportionally"
-    7_fatigue:      "5 s leaky bucket per channel — fills only while driving,
-                     leaks only while idle; >70 % duty → linear taper to 40 %"
-    8_rate_limit:   "±24 / tick → full-scale ramp ~250 ms"
-    9_drive:        "da7280_set_amplitude(dev, amp) — driver handles the mux"
+    2_flag_gate:    "STATIONARY/BLOCKED/INVALID → mute (drive 0, reset phases)"
+    3a_dropoff:     "DROPOFF override → 150 ms on / 150 ms off square-wave
+                     on all 4 channels (≈ 3.3 Hz)"
+    3b_head:        "HEAD_OBSTACLE override → 50 ms on / 50 ms off on outer
+                     pair (LEFT + RIGHT) only; centre channels muted.
+                     10 Hz, perceptually distinct from drop-off."
+    4_target:       "urgency<32 → 0; else linear map to [DRIVE_MIN_PERCEPT..DRIVE_MAX]"
+    5_yaw_dampen:   "YAW_SLEW → target × 0.4 (translates to slower pulse rate)"
+    6_fatigue:      "5 s leaky bucket per channel; >70 % bucket fill → target
+                     tapered to 40 % floor → pulse period stretches"
+    7_period:       "target → period_ticks. PULSE_PERIOD_FAST_TICKS (3) at
+                     max intensity = 6.7 Hz; PULSE_PERIOD_SLOW_TICKS (20)
+                     just above floor = 1 Hz. period == 0 → channel silent."
+    8_drive:        "if pulse_phase rolls over period, fire 1 tick @ DRIVE_MAX;
+                     else drive 0. da7280_set_amplitude() per channel; driver
+                     handles the mux. Per-channel cur_amp dedup keeps the gap
+                     I²C-free."
 
 ble_protocol:
   unchanged: true

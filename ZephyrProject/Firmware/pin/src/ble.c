@@ -144,6 +144,18 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 	}
 }
 
+static void scan_heartbeat(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(scan_heartbeat_work, scan_heartbeat);
+
+static void scan_heartbeat(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (!default_conn) {
+		LOG_INF("Still scanning for HapNav-Wrist…");
+		k_work_schedule(&scan_heartbeat_work, K_SECONDS(5));
+	}
+}
+
 static void start_scan(void)
 {
 	int err = bt_le_scan_start(BT_LE_SCAN_ACTIVE, scan_cb);
@@ -152,6 +164,7 @@ static void start_scan(void)
 		return;
 	}
 	LOG_INF("Scanning for HapNav-Wrist");
+	k_work_schedule(&scan_heartbeat_work, K_SECONDS(5));
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)

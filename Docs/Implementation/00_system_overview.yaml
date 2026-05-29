@@ -24,12 +24,10 @@ architecture:
       tof_grid:
         part: VL53L5CX (8x8 grid, 10 Hz)
         i2c_addr: 0x29 default → moved to 0x2A at boot (vendor ULD)
-        physical_mount: chest enclosure face, −8° downtilt
-        optical_roll: +45° about the optical axis (the original main
-                      diagonal becomes the world-frame horizontal line)
-        purpose: lateral obstacle detection (4 urgency bins, ±27.5°
-                 horizontal extent after the roll), plus drop-off via the
-                 lower-half-of-diamond pixels.
+        physical_mount: chest enclosure face, −8° downtilt, axis-aligned
+                        (no optical-axis roll)
+        purpose: lateral obstacle detection (4 urgency bins, ±22.3°
+                 horizontal extent), plus drop-off via the bottom rows.
       tof_head:
         part: VL53L1X (single-zone)
         i2c_addr: 0x29 (Zephyr in-tree st,vl53l1x driver, zephyr,deferred-init)
@@ -50,10 +48,13 @@ architecture:
     i2c_mux: PCA9546A @ 0x70 (driven by Zephyr's in-tree ti,tca9546a — binding
              header explicitly notes "compatible with NXP PCA9546A")
     actuators: 4x DA7280 @ 0x4A (one per mux channel) + Jinlong G1040003D LRA
-    drive_policy: "20 Hz worker; watchdog mute, dropoff square-wave, fatigue
-                   taper (true leaky bucket — fills only while driving),
-                   rate limit, two stacked drive caps (policy 150,
-                   driver 250)"
+    drive_policy: "20 Hz worker. Pulse-based: each channel fires a single
+                   50 ms hit at DRIVE_MAX (no graded amplitude); urgency
+                   intensity encodes pulse rate (1–6.7 Hz). Override
+                   patterns: drop-off (all 4 @ 3.3 Hz square wave),
+                   head-obstacle (outer pair @ 10 Hz). Watchdog mute,
+                   per-channel fatigue bucket slows pulse rate after
+                   sustained drive."
 
 geometry_and_physics:
   user_height_cm: 175
@@ -65,8 +66,8 @@ geometry_and_physics:
       diagonal_deg: 63
       per_axis_deg: 44.5
       grid_resolution: 8x8 (64 zones)
-      effective_horizontal_after_45deg_roll_deg: 55   # ±27.5° corner-to-corner
-      bin_width_deg: 13.75
+      effective_horizontal_deg: 44.5   # axis-aligned, no roll
+      bin_width_deg: 11.1              # 4 bins × ~2 columns each
     tof_head:
       cone_full_angle_deg: 27
       world_tilt_deg: +20
@@ -99,7 +100,11 @@ algorithmic_pipeline:
   sensor_fusion:
     algorithm: Madgwick AHRS (MARG variant)
     beta: 0.1
-    corrections: "Magnetometer X-axis flipped (mag_raw[0] = -mag_raw[0])"
+    corrections: "Magnetometer axes re-mapped to the IMU frame before
+                  Madgwick: (mag_imu.x, mag_imu.y, mag_imu.z) =
+                  (mag.y, mag.x, -mag.z). The two sensors share a
+                  mounting plane but the LIS2MDL silkscreen is rotated
+                  90° from the LSM6DSO with Z flipped."
   obstacle_detection:
     stages:
       1_validity:      "Filter by status (5,6,9) and range (300-3000 mm)"

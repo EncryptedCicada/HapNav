@@ -9,17 +9,30 @@
 #define MIN_FLOOR_RAY_DOWN_SIN  0.20f
 
 /* Predicted floor slant-range cutoff. Past this we'd be reasoning about
- * floor outside our 3 m operating range, where missing returns are
- * uninformative. */
+ * floor outside our useful operating range, where missing returns are
+ * uninformative. Bench-mode scales this down to a 50 cm envelope so the
+ * geometry matches the BENCH_MODE constants in obstacle.c. */
+#if defined(CONFIG_HAPNAV_BENCH_MODE)
+#define PREDICTED_RANGE_CUTOFF_M  0.5f
+#else
 #define PREDICTED_RANGE_CUTOFF_M  3.5f
+#endif
 
 /* Measured-vs-predicted ratio above which we judge the floor is gone. */
 #define DROPOFF_RANGE_RATIO  1.30f
 
-/* Need at least this many bottom-row pixels both eligible as floor rays
- * AND missing returns, before we cry drop-off. Suppresses single-pixel
- * glitches and reflective-floor anomalies. */
-#define MIN_DROPOFF_PIXELS  3
+/* How many pixels both eligible as floor rays AND missing the expected
+ * return we need before flagging DROPOFF, and whether invalid-status
+ * pixels count as "missing". Bench setups are noisy (lots of status=255
+ * even on a healthy desk) so we raise the bar and require an actual
+ * valid-but-too-far reading rather than counting invalid pixels. */
+#if defined(CONFIG_HAPNAV_BENCH_MODE)
+#define MIN_DROPOFF_PIXELS      8
+#define DROPOFF_COUNT_INVALID   false
+#else
+#define MIN_DROPOFF_PIXELS      3
+#define DROPOFF_COUNT_INVALID   true
+#endif
 
 bool hapnav_dropoff_check(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 			  const uint8_t target_status[HAPNAV_TOF_ZONES],
@@ -46,10 +59,10 @@ bool hapnav_dropoff_check(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 		uint8_t s = target_status[i];
 		bool status_ok = (s == 5 || s == 6 || s == 9);
 
-		bool floor_missing;
+		bool floor_missing = false;
 		if (!status_ok) {
-			/* No reliable return where floor should be. */
-			floor_missing = true;
+			/* Bench mode: invalid pixels are noise, not cliff. */
+			floor_missing = DROPOFF_COUNT_INVALID;
 		} else {
 			float r_m = distances_mm[i] * 0.001f;
 			floor_missing = (r_m > predicted * DROPOFF_RANGE_RATIO);

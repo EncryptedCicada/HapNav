@@ -8,32 +8,39 @@ caps came from exactly that mistake).
 ## Block diagram
 
 ```
-       USB-C (host PC)                      Single-cell Li-ion
-            │                                        │
-            ▼                                        ▼
- ┌──────────────────────────┐         ┌────────────────────────────┐
- │   Seeed XIAO nRF52840    │         │    BQ25185 charger board   │
- │   (logic + BLE radio)    │         │    USB aux input + power-  │
- │                          │         │    path output  (LOAD pin) │
- └─────┬────────────────┬───┘         └──────────────┬─────────────┘
-       │ I2C1            │                           │ Vsys (≈ Vbat or VUSB-drop)
-       │ SCL = D5 (P0.05)│ GND ───── common ─────────┤
-       │ SDA = D4 (P0.04)│                           ▼
-       │                 │              ┌──────────────────────────┐
-       │                 │              │  TPS62827 buck (3.3 V)   │
-       │                 │              │  EN tied high (default)  │
-       │                 │              └─────────────┬────────────┘
-       │                 │                            │ 3.3 V (haptic rail)
-       │                 │      ┌─────────────────────┼─────────────────────┐
-       │                 │      │                     │                     │
-       │                 │      ▼                     ▼                     ▼
-       │            ┌─────────────────┐  Qwiic chain  passes 3.3 V / GND / SDA / SCL
-       └────────────│ PCA9546A mux @  │── ch0 → DA7280 + LRA  (LEFT)
-                    │   0x70  (Qwiic) │── ch1 → DA7280 + LRA  (CENTER-LEFT)
-                    │                 │── ch2 → DA7280 + LRA  (CENTER-RIGHT)
-                    │                 │── ch3 → DA7280 + LRA  (RIGHT)
-                    └─────────────────┘
+       USB-C (host)              Single-cell Li-ion
+            │                            │
+            ▼                            ▼
+ ┌──────────────────────────────────────────────┐
+ │   BQ25185 charger board (USB aux + power-path)│
+ │   LOAD = Vsys (≈ Vbat or VUSB-drop)           │
+ └──────────────┬───────────────────┬───────────┘
+                │                   │
+                ▼                   ▼
+   ┌────────────────────┐   ┌─────────────────────────┐
+   │ 5 V boost converter│   │ 3.3 V buck converter    │
+   │  → XIAO 5V pin     │   │  → mux + driver rail    │
+   └────────┬───────────┘   └─────────────┬───────────┘
+            │ 5 V                          │ 3.3 V (haptic rail)
+            ▼                              │
+ ┌──────────────────────────┐              │
+ │   Seeed XIAO nRF52840    │              │
+ │   (logic + BLE radio)    │              │
+ └─────┬────────────────┬───┘              │
+       │ I2C1            │ GND ── common ──┤
+       │ SCL = D5 (P0.05)│                 │
+       │ SDA = D4 (P0.04)│                 ▼
+       │                 │      ┌──────────────────────┐
+       │                 │      │  PCA9546A mux @ 0x70 │
+       │                 │      │  (Qwiic 3.3 V power) │
+       └─────────────────┴──────┤                      │
+                                ├── ch0 → DA7280 + LRA (LEFT)
+                                ├── ch1 → DA7280 + LRA (CENTER-LEFT)
+                                ├── ch2 → DA7280 + LRA (CENTER-RIGHT)
+                                └── ch3 → DA7280 + LRA (RIGHT)
 ```
+
+The 5 V boost is needed because the XIAO BLE board's `VIN` (the 5V-labelled pad) expects 3.5–5.5 V; a single-cell Li-ion at 3.7 V works but droops under load. The 3.3 V buck is independent so the haptic rail can't sag the radio's supply (the v3 brownout failure mode).
 
 ## Boards & roles
 

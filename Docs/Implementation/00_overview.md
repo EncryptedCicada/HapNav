@@ -36,6 +36,7 @@ data into directional haptic feedback. The two units talk over BLE.
 | [07_haptic_policy.md](07_haptic_policy.md)         | Wristband: urgency → LRA drive |
 | [08_power_and_assembly.md](08_power_and_assembly.md) | Wristband hardware: BQ25185 → buck → mux → drivers |
 | [09_head_clearance.md](09_head_clearance.md)         | VL53L1X head sensor + future down-facing height calibration |
+| [10_pin_power_and_assembly.md](10_pin_power_and_assembly.md) | Pin hardware: BQ25185 → 5 V boost + 3.3 V buck → I²C sensors |
 
 ## Geometry
 

@@ -18,34 +18,54 @@ LOG_MODULE_REGISTER(hapnav_obstacle, LOG_LEVEL_INF);
 #define TOF_HALF_FOV_DEG         22.3f
 #define TOF_DEG_PER_ZONE         (2.0f * TOF_HALF_FOV_DEG / TOF_ROWS)
 
-/* The sensor is physically rolled by +45° around its optical axis: the
- * original main diagonal (pixel (0,0)→(7,7)) becomes the world-frame
- * horizontal line, so the four extreme directions (cardinal ±27.5°
- * about each axis) line up with up/right/down/left. The pipeline mirrors
- * the physical roll in software so the ray table stays accurate. */
-#define TOF_ROLL_DEG             45.0f
-
-/* After the roll the lateral extent is the *diagonal* of the original
- * grid — ±27.5° horizontal — split evenly across the 4 urgency bins. */
-#define TOF_BIN_BOUNDARY_DEG     13.75f
-
 #define SENSOR_DOWNTILT_DEG      8.0f
+
+#if defined(CONFIG_HAPNAV_BENCH_MODE)
+/* Bench-demo geometry: the pin stands UPRIGHT on a desk, so the VL53L5CX
+ * optical centre sits ~1–2 cm above the desk surface and grazes along it
+ * rather than looking down at it. Objects move within a 10–50 cm envelope.
+ * The stationary detector is defanged so a pin resting on the bench doesn't
+ * mute the pipeline.
+ *
+ * Because the sensor grazes the desk, every desk pixel lands at a roughly
+ * constant world-frame height of −(sensor height) ≈ −1.5 cm. FLOOR_BAND_HIGH
+ * must therefore sit just below the sensor (−0.5 cm) so the desk plane is
+ * classified as FLOOR and excluded — otherwise the whole desk reads as a
+ * wall of obstacles. The cost is a ~0.5–1.5 cm "blind band" right at desk
+ * level: objects must rise to within ~0.5 cm of the sensor height to be
+ * seen, which is fine for the cups/hands/boxes used in the demo. */
+#define SENSOR_HEIGHT_M          0.015f
+#define USER_HEAD_ABOVE_SENSOR_M 0.05f
+#define HEAD_CLEARANCE_M         0.05f
+#define HEAD_TOP_BAND_M          (USER_HEAD_ABOVE_SENSOR_M + HEAD_CLEARANCE_M)
+#define FLOOR_BAND_HIGH_M        (-0.005f)
+#define MIN_RANGE_MM             50
+#define MAX_RANGE_MM             500
+#define CLUSTER_DELTA_MM         30
+/* Variance is always ≥ 0, so a threshold of −1 makes `var < THRESH`
+ * unsatisfiable → stationary never fires. (Earlier I set this to 1e9
+ * thinking "huge threshold = disabled"; that actually inverted the
+ * logic and made stationary always-on, which muted the wristband for
+ * every frame on the bench.) */
+#define STATIONARY_VAR_THRESH_G2 (-1.0f)
+#else
+/* Worn / real-world geometry. */
 #define SENSOR_HEIGHT_M          1.35f
 #define USER_HEAD_ABOVE_SENSOR_M 0.40f         /* 1.75 m head − 1.35 m sensor */
 #define HEAD_CLEARANCE_M         0.30f
 #define HEAD_TOP_BAND_M          (USER_HEAD_ABOVE_SENSOR_M + HEAD_CLEARANCE_M)
 #define FLOOR_BAND_HIGH_M        (-1.20f)      /* below sensor; tolerates 15 cm of floor irregularity */
-
 #define MIN_RANGE_MM             300
 #define MAX_RANGE_MM             3000
+#define CLUSTER_DELTA_MM         200
+#define STATIONARY_VAR_THRESH_G2 0.0025f       /* (0.05 g)² */
+#endif
 
 #define DEG2RAD                  0.017453293f
 
 /* ── Detection thresholds ────────────────────────────────────────────────── */
 
-#define CLUSTER_DELTA_MM           200
 #define MIN_CLUSTER_PIXELS         2
-#define STATIONARY_VAR_THRESH_G2   0.0025f     /* (0.05 g)² */
 #define STATIONARY_WINDOW_FRAMES   10           /* 1 s @ 10 Hz */
 #define YAW_SLEW_RADPS             (60.0f * DEG2RAD)
 
@@ -53,12 +73,35 @@ LOG_MODULE_REGISTER(hapnav_obstacle, LOG_LEVEL_INF);
 #define TTC_NO_URGENCY_S           5.0f
 
 #define SENSOR_BLOCKED_NEAR_PIX    32          /* half the array reads sub-min */
-#define MOSTLY_INVALID_VALID_PIX   8           /* fewer than 1/8 valid */
+/* Hysteresis band on the valid-pixel count so per-pixel status noise (heavy
+ * at the grazing desk angle) doesn't flip the whole-frame mute every frame.
+ * Latch MOSTLY_INVALID below ENTER, release only once comfortably above EXIT. */
+#define MOSTLY_INVALID_ENTER_PIX   6
+#define MOSTLY_INVALID_EXIT_PIX    10
+
+/* ── Stationary-obstacle habituation ──────────────────────────────────────
+ * A bin whose nearest range holds within HABIT_DEADBAND_MM of where it was
+ * first seen is "stationary w.r.t. the pin": its urgency decays by
+ * HABIT_DECAY each frame toward HABIT_FLOOR, fading from a firm cue to (near)
+ * silence over ~2-3 s so a parked obstacle stops nagging. Any range change
+ * beyond the deadband — the object moved, or the pin moved — snaps it back to
+ * full. HABIT_DEADBAND_MM is the sensitivity knob: widen it to tolerate more
+ * movement before re-alerting; raise HABIT_FLOOR for a faint "still there"
+ * reminder instead of full silence. */
+#if defined(CONFIG_HAPNAV_HABITUATION)
+#if defined(CONFIG_HAPNAV_BENCH_MODE)
+#define HABIT_DEADBAND_MM   40
+#else
+#define HABIT_DEADBAND_MM   150
+#endif
+#define HABIT_DECAY         0.88f
+#define HABIT_FLOOR         0.0f
+#endif
 
 /* ── State ────────────────────────────────────────────────────────────────── */
 
-static float   g_ray_B[HAPNAV_TOF_ZONES][3];   /* unit rays in body frame, roll + tilt baked in */
-static uint8_t g_az_bin[HAPNAV_TOF_ZONES];     /* per-pixel azimuth bin after the 45° roll */
+static float   g_ray_B[HAPNAV_TOF_ZONES][3];   /* unit rays in body frame, tilt baked in */
+static uint8_t g_col_bin[TOF_COLS] = { 0, 0, 1, 1, 2, 2, 3, 3 };
 
 static float g_accel_mag_hist[STATIONARY_WINDOW_FRAMES];
 static int   g_accel_hist_idx;
@@ -66,6 +109,12 @@ static int   g_accel_hist_count;
 
 static int16_t g_prev_nearest_mm[4];
 static bool    g_prev_valid[4];
+static bool    g_mostly_invalid;   /* latched, hysteretic (see thresholds) */
+
+#if defined(CONFIG_HAPNAV_HABITUATION)
+static float   g_habit[4];         /* per-bin urgency scale, decays when still */
+static int16_t g_habit_ref_mm[4];  /* range the current habituation is anchored to */
+#endif
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -82,6 +131,25 @@ static inline uint8_t to_u8(float v01)
 	return (uint8_t)u;
 }
 
+#if defined(CONFIG_HAPNAV_HABITUATION)
+/* Urgency scale in [HABIT_FLOOR, 1] that fades while a bin's nearest
+ * obstacle holds still and snaps back to 1 the moment it moves. */
+static float update_habituation(int b, int16_t nearest_mm)
+{
+	if (g_habit_ref_mm[b] < 0 ||
+	    abs(nearest_mm - g_habit_ref_mm[b]) > HABIT_DEADBAND_MM) {
+		g_habit_ref_mm[b] = nearest_mm;   /* (re)arm from here */
+		g_habit[b]        = 1.0f;
+		return 1.0f;
+	}
+	g_habit[b] *= HABIT_DECAY;
+	if (g_habit[b] < HABIT_FLOOR) {
+		g_habit[b] = HABIT_FLOOR;
+	}
+	return g_habit[b];
+}
+#endif
+
 static void quat_to_R_WB(const float q[4], float R[3][3])
 {
 	float w = q[0], x = q[1], y = q[2], z = q[3];
@@ -97,26 +165,16 @@ static void quat_to_R_WB(const float q[4], float R[3][3])
 }
 
 /*
- * Build the per-zone unit ray in body frame and the azimuth-bin LUT.
+ * Build the per-zone unit ray in body frame.
  *
  * Sensor frame (S):  +X right, +Y up, +Z forward (optical axis).
  * Body frame (B):    +X right, +Y back, +Z up — so -Y_B is "user forward".
- *
- * Order of operations:
- *   1. raw (az, el) → unit ray in S (no roll, no tilt)
- *   2. R_z(+TOF_ROLL_DEG) — sensor's own 45° optical-axis roll
- *   3. S → B mapping:  X_B = X_S, Y_B = -Z_S, Z_B = Y_S
- *   4. R_x(+SENSOR_DOWNTILT_DEG) about body X — nose-down pitch
- *
- * The post-rotation azimuth (in S after step 2) decides the 4-bin
- * urgency lane each pixel feeds into; the world-frame classifier in
- * hapnav_obstacle_step() independently rejects pixels that come back
- * as floor or ceiling.
+ * No-tilt mapping S → B:  X_B = X_S, Y_B = -Z_S, Z_B = Y_S.
+ * Then apply R_x(+θ) for downtilt: rotates the optical axis (-Y_B before
+ * tilt) toward -Z_B, i.e. nose-down by θ.
  */
 static void build_ray_table(void)
 {
-	const float cr = cosf(TOF_ROLL_DEG     * DEG2RAD);
-	const float sr = sinf(TOF_ROLL_DEG     * DEG2RAD);
 	const float ct = cosf(SENSOR_DOWNTILT_DEG * DEG2RAD);
 	const float st = sinf(SENSOR_DOWNTILT_DEG * DEG2RAD);
 
@@ -125,21 +183,16 @@ static void build_ray_table(void)
 			float az = (c - 3.5f) * TOF_DEG_PER_ZONE * DEG2RAD;
 			float el = (3.5f - r) * TOF_DEG_PER_ZONE * DEG2RAD;
 
-			float xs0 = sinf(az) * cosf(el);
-			float ys0 = sinf(el);
-			float zs0 = cosf(az) * cosf(el);
+			float xs = sinf(az) * cosf(el);
+			float ys = sinf(el);
+			float zs = cosf(az) * cosf(el);
 
-			/* 2. Roll about optical axis: X' = Xc − Ys, Y' = Xs + Yc */
-			float xs = xs0 * cr - ys0 * sr;
-			float ys = xs0 * sr + ys0 * cr;
-			float zs = zs0;
-
-			/* 3. S → B (no tilt) */
+			/* S → B (no tilt) */
 			float xb0 =  xs;
 			float yb0 = -zs;
 			float zb0 =  ys;
 
-			/* 4. R_x(+θ): Y' = Y·c − Z·s, Z' = Y·s + Z·c */
+			/* Apply downtilt R_x(+θ): Y' = Y·c − Z·s, Z' = Y·s + Z·c */
 			float xb = xb0;
 			float yb = yb0 * ct - zb0 * st;
 			float zb = yb0 * st + zb0 * ct;
@@ -148,17 +201,6 @@ static void build_ray_table(void)
 			g_ray_B[idx][0] = xb;
 			g_ray_B[idx][1] = yb;
 			g_ray_B[idx][2] = zb;
-
-			/* Post-roll sensor-frame azimuth selects the lateral bin.
-			 * atan2(X_S, Z_S) — independent of elevation and of
-			 * the subsequent body-frame mapping. */
-			float az_rot_deg = atan2f(xs, zs) * (180.0f / 3.14159265f);
-			uint8_t bin;
-			if      (az_rot_deg < -TOF_BIN_BOUNDARY_DEG) bin = 0;   /* LEFT  */
-			else if (az_rot_deg <  0.0f)                 bin = 1;   /* CL    */
-			else if (az_rot_deg <  TOF_BIN_BOUNDARY_DEG) bin = 2;   /* CR    */
-			else                                         bin = 3;   /* RIGHT */
-			g_az_bin[idx] = bin;
 		}
 	}
 }
@@ -174,10 +216,24 @@ void hapnav_obstacle_init(void)
 	memset(g_accel_mag_hist,  0, sizeof(g_accel_mag_hist));
 	memset(g_prev_nearest_mm, 0, sizeof(g_prev_nearest_mm));
 	memset(g_prev_valid,      0, sizeof(g_prev_valid));
+	g_mostly_invalid = false;
 
-	LOG_INF("Obstacle pipeline ready (roll %.0f°, tilt %.1f°, sensor %.2fm above floor)",
-		(double)TOF_ROLL_DEG, (double)SENSOR_DOWNTILT_DEG,
-		(double)SENSOR_HEIGHT_M);
+#if defined(CONFIG_HAPNAV_HABITUATION)
+	for (int b = 0; b < 4; b++) {
+		g_habit[b]        = 1.0f;
+		g_habit_ref_mm[b] = -1;
+	}
+#endif
+
+	LOG_INF("Obstacle pipeline ready%s (tilt %.1f°, sensor %.2fm above floor, "
+		"range %d..%dmm)",
+#if defined(CONFIG_HAPNAV_BENCH_MODE)
+		" [BENCH MODE]",
+#else
+		"",
+#endif
+		(double)SENSOR_DOWNTILT_DEG, (double)SENSOR_HEIGHT_M,
+		MIN_RANGE_MM, MAX_RANGE_MM);
 }
 
 void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
@@ -243,7 +299,13 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	}
 
 	bool sensor_blocked = (n_near  >= SENSOR_BLOCKED_NEAR_PIX);
-	bool mostly_invalid = (n_valid <  MOSTLY_INVALID_VALID_PIX);
+
+	if (n_valid < MOSTLY_INVALID_ENTER_PIX) {
+		g_mostly_invalid = true;
+	} else if (n_valid >= MOSTLY_INVALID_EXIT_PIX) {
+		g_mostly_invalid = false;
+	}
+	bool mostly_invalid = g_mostly_invalid;
 
 	/* ── 2-3. Body→world ray rotation; lift to point cloud where valid ── */
 
@@ -289,22 +351,28 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	for (int b = 0; b < 4; b++) {
 		int16_t min_r = -1;
 
-		for (int i = 0; i < HAPNAV_TOF_ZONES; i++) {
-			if (g_az_bin[i] != b) continue;
-			if (cls[i] != CLS_OBSTACLE) continue;
-			if (min_r < 0 || distances_mm[i] < min_r) {
-				min_r = distances_mm[i];
+		for (int r = 0; r < TOF_ROWS; r++) {
+			for (int c = 0; c < TOF_COLS; c++) {
+				if (g_col_bin[c] != b) continue;
+				int idx = r * TOF_COLS + c;
+				if (cls[idx] != CLS_OBSTACLE) continue;
+				if (min_r < 0 || distances_mm[idx] < min_r) {
+					min_r = distances_mm[idx];
+				}
 			}
 		}
 
 		if (min_r < 0) continue;
 
 		int support = 0;
-		for (int i = 0; i < HAPNAV_TOF_ZONES; i++) {
-			if (g_az_bin[i] != b) continue;
-			if (cls[i] != CLS_OBSTACLE) continue;
-			if (abs(distances_mm[i] - min_r) <= CLUSTER_DELTA_MM) {
-				support++;
+		for (int r = 0; r < TOF_ROWS; r++) {
+			for (int c = 0; c < TOF_COLS; c++) {
+				if (g_col_bin[c] != b) continue;
+				int idx = r * TOF_COLS + c;
+				if (cls[idx] != CLS_OBSTACLE) continue;
+				if (abs(distances_mm[idx] - min_r) <= CLUSTER_DELTA_MM) {
+					support++;
+				}
 			}
 		}
 		if (support >= MIN_CLUSTER_PIXELS) {
@@ -341,6 +409,11 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	for (int b = 0; b < 4; b++) {
 		if (bin_nearest_mm[b] < 0) {
 			out->urgency[b] = 0;
+#if defined(CONFIG_HAPNAV_HABITUATION)
+			/* Bin cleared — re-arm so the next obstacle alerts fully. */
+			g_habit[b]        = 1.0f;
+			g_habit_ref_mm[b] = -1;
+#endif
 			continue;
 		}
 		float r_m = bin_nearest_mm[b] * 0.001f;
@@ -357,7 +430,9 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 		float urg = (prox > ttc_score) ? prox : ttc_score;
 		if (stationary)  urg *= 0.5f;
 		if (yaw_slewing) urg *= 0.5f;
-
+#if defined(CONFIG_HAPNAV_HABITUATION)
+		urg *= update_habituation(b, bin_nearest_mm[b]);
+#endif
 		out->urgency[b] = to_u8(urg);
 	}
 
@@ -377,8 +452,12 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 
 	/* ── 8. Drop-off check ────────────────────────────────────────────── */
 
+#if defined(CONFIG_HAPNAV_DROPOFF)
 	bool dropoff = hapnav_dropoff_check(distances_mm, target_status,
 					    ray_W, SENSOR_HEIGHT_M);
+#else
+	bool dropoff = false;
+#endif
 
 	/* ── 9. Head clearance from VL53L1X ───────────────────────────────── */
 

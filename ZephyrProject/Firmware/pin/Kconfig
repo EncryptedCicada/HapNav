@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Application Kconfig — chains in subsystem Kconfigs so symbols like
+# CONFIG_HAPNAV_BENCH_MODE resolve through prj.conf.
+
+rsource "../lib/sensors/Kconfig"
+
+source "Kconfig.zephyr"

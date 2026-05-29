@@ -17,7 +17,7 @@ because they both default to 7-bit `0x29`.
    1.35 m    ───────────────────►            │
    above     ╱ ╱ ╱ ╱ ╱ ╱  forward            │
    floor   ╱ ╱ ╱ ╱ ╱        VL53L5CX         │
-         ╱ ╱ ╱ ╱   (45°-rolled diamond,      │
+         ╱ ╱ ╱ ╱   (axis-aligned grid,        │
        ╱ ╱ ╱ ╱     −8° downtilt)      floor ▼
      ╱ ╱ ╱
    floor
@@ -84,7 +84,9 @@ VL53L5CX boots back at `0x29`, and the shuffle repeats.
 
 The DT alias `hapnav-tof-head` points at the VL53L1X node so the
 firmware can resolve the `XSHUT` GPIO without hard-coding which `&gpioN
-M` it lives on. Pin assignment is `D2 = &gpio0 3`.
+M` it lives on. Pin assignment is `D7 = &gpio1 12` (ESP32-S3 GPIO44 —
+default UART0 RX, but the console runs over USB-Serial-JTAG so the pin
+is free).
 
 ## Wristband response — `HAPNAV_OBS_FLAG_HEAD_OBSTACLE`
 

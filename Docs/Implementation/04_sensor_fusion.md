@@ -18,12 +18,25 @@ Madgwick AHRS (MARG variant) running on the pin every 100 ms.
 
 Conversion constants are in `hapnav/ble_proto.h` (`HAPNAV_*_PER_LSB`).
 
-## Magnetometer X-flip
+## Magnetometer axis remap
 
-The LIS2MDL is mounted with its X-axis opposite the LSM6DSO's. The pin
-firmware flips `mag_raw[0]` once on read, so Madgwick sees a coherent
-right-handed sensor frame and so consumers downstream (obstacle pipeline,
-visualizer) don't have to know.
+The LSM6DSO and the LIS2MDL share a mounting plane but their silkscreen
+axes don't line up. Empirically (and consistently with right-handed
+orientation rules):
+
+| IMU axis | Same physical direction as | Polarity |
+|---|---|---|
+| `IMU.X` | `Mag.Y` | same |
+| `IMU.Y` | `Mag.X` | same |
+| `IMU.Z` | `Mag.Z` | **opposite** |
+
+So the pin firmware applies the mapping `(mag_imu.x, mag_imu.y,
+mag_imu.z) = (mag.y, mag.x, -mag.z)` before passing the magnetic vector
+to Madgwick. The X↔Y swap with a Z negation is what falls out of the two
+sensors being co-planar but rotated 90° about Z and flipped about the
+board plane — the right-handed coordinate convention forces the Z sign
+flip once the X/Y swap is done. Consumers downstream (obstacle pipeline,
+visualizer) see a single coherent right-handed sensor frame.
 
 ## What the obstacle pipeline assumes
 

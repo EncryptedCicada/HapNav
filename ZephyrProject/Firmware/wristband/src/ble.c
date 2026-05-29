@@ -20,29 +20,22 @@ static struct bt_uuid_128 svc_uuid   = BT_UUID_INIT_128(HAPNAV_UUID_SVC_VAL);
 static struct bt_uuid_128 frame_uuid = BT_UUID_INIT_128(HAPNAV_UUID_FRAME_VAL);
 
 /*
- * Emit one frame as a single-line JSON object on the console. printk goes
- * straight to UART (no Zephyr LOG decoration), so the resulting stream is
- * trivial to parse downstream.
+ * Emit only what the wristband actually consumes from each frame —
+ * timestamp + obstacles block — as a single-line JSON record. The full
+ * frame still arrives over BLE; we just don't dump the 64-pixel ToF
+ * arrays and the quaternion since the haptic policy ignores them.
+ *
+ * printk goes straight to UART (no Zephyr LOG decoration), so the
+ * resulting stream is trivial to parse downstream.
  */
 static void print_frame_json(const struct hapnav_frame *f)
 {
-	printk("{\"distances\":[");
-	for (int i = 0; i < HAPNAV_TOF_ZONES; i++) {
-		printk("%s%d", (i ? "," : ""), f->distances_mm[i]);
-	}
-	printk("],\"status\":[");
-	for (int i = 0; i < HAPNAV_TOF_ZONES; i++) {
-		printk("%s%u", (i ? "," : ""), f->target_status[i]);
-	}
-	printk("],\"quat\":[%.4f,%.4f,%.4f,%.4f],",
-	       (double)f->quat[0], (double)f->quat[1],
-	       (double)f->quat[2], (double)f->quat[3]);
-	printk("\"obstacles\":{\"urgency\":[%u,%u,%u,%u],"
-	       "\"nearest_mm\":%d,\"flags\":%u}}\n",
-	       f->obstacles.urgency[0], f->obstacles.urgency[1],
-	       f->obstacles.urgency[2], f->obstacles.urgency[3],
-	       f->obstacles.nearest_range_mm,
-	       f->obstacles.flags);
+	const struct hapnav_obstacles *o = &f->obstacles;
+	printk("RX {\"ts\":%u,\"urg\":[%u,%u,%u,%u],"
+	       "\"near_mm\":%d,\"flags\":\"0x%02x\"}\n",
+	       f->timestamp_ms,
+	       o->urgency[0], o->urgency[1], o->urgency[2], o->urgency[3],
+	       (int)o->nearest_range_mm, (unsigned)o->flags);
 }
 
 static ssize_t frame_write(struct bt_conn *conn,
