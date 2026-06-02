@@ -1,5 +1,4 @@
 #include <hapnav/obstacle.h>
-#include <hapnav/dropoff.h>
 
 #include <zephyr/logging/log.h>
 #include <math.h>
@@ -450,14 +449,9 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	}
 	out->nearest_range_mm = nearest;
 
-	/* ── 8. Drop-off check ────────────────────────────────────────────── */
-
-#if defined(CONFIG_HAPNAV_DROPOFF)
-	bool dropoff = hapnav_dropoff_check(distances_mm, target_status,
-					    ray_W, SENSOR_HEIGHT_M);
-#else
-	bool dropoff = false;
-#endif
+	/* ── 8. Drop-off — handled by the down-pointing VL53L1X in sensors.c.
+	 * The front grid no longer participates; the caller OR's the flag in
+	 * after the obstacle frame is built. */
 
 	/* ── 9. Head clearance from VL53L1X ───────────────────────────────── */
 
@@ -476,6 +470,6 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	if (sensor_blocked) out->flags |= HAPNAV_OBS_FLAG_SENSOR_BLOCKED;
 	if (mostly_invalid) out->flags |= HAPNAV_OBS_FLAG_MOSTLY_INVALID;
 	if (yaw_slewing)    out->flags |= HAPNAV_OBS_FLAG_YAW_SLEWING;
-	if (dropoff)        out->flags |= HAPNAV_OBS_FLAG_DROPOFF;
 	if (head_obstacle)  out->flags |= HAPNAV_OBS_FLAG_HEAD_OBSTACLE;
+	/* HAPNAV_OBS_FLAG_DROPOFF is set by sensors.c from the down ToF. */
 }

@@ -53,7 +53,8 @@ struct hapnav_obstacles {
 /*
  * Combined per-sample frame, 219 bytes packed.
  * `timestamp_ms` is the pin's k_uptime_get_32() at frame assembly.
- * `quat` is unit quaternion [w, x, y, z] from Madgwick AHRS on the pin.
+ * `quat` is the unit quaternion [w, x, y, z] from the BNO055's onboard NDOF
+ * fusion (body→world).
  * `distances_mm` and `target_status` are VL53L5CX ULD outputs at 8x8.
  * `obstacles` is the post-processed report the wristband acts on.
  */
@@ -66,10 +67,5 @@ struct hapnav_frame {
 } __packed;
 
 #define HAPNAV_FRAME_SIZE  sizeof(struct hapnav_frame)
-
-/* Conversion constants — used by whoever wants engineering units. */
-#define HAPNAV_ACCEL_MG_PER_LSB     0.061f
-#define HAPNAV_GYRO_MDPS_PER_LSB    70.0f
-#define HAPNAV_MAG_MGAUSS_PER_LSB   1.5f
 
 #endif /* HAPNAV_BLE_PROTO_H_ */

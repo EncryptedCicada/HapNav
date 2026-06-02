@@ -1,58 +1,51 @@
 /*
- * XIAO ESP32-S3 chest pin overlay.
+ * XIAO ESP32-S3 chest pin overlay (v3 — everything on the mux).
  *
- * I2C devices on &i2c0 (SDA = D2/GPIO0_3, SCL = D3/GPIO0_4 — re-mapped
- * away from the board default D4/D5 because those pads tested dead on
- * this revision of the prototype):
- *   - LSM6DSO          IMU                @ 0x6B (Sparkfun Qwiic default)
- *   - LIS2MDL          magnetometer       @ 0x1E
- *   - VL53L5CX         8×8 ToF (forward)  @ 0x52/8-bit → moved to 0x54/8-bit
- *                                                       at boot to free 0x29
- *   - VL53L1X (head)   single-zone ToF    @ 0x29  (in-tree Zephyr driver)
- *   - VL53L1X (height) single-zone ToF    @ <future, requires mux or
- *                                            second XSHUT>
+ * Topology:
  *
- * Address conflict: both VL53L5CX and VL53L1X power on at 7-bit 0x29.
- * Until we have a TCA9548A on the pin too, we sequence them with the
- * VL53L1X's XSHUT pin (D7/GPIO1_12 = ESP32-S3 GPIO44):
+ *   I²C0  (D2=SDA, D3=SCL, 400 kHz) ── TCA9548A mux @ 0x70
+ *                                      ├─ ch0 → VL53L1X  (head, +20°) @ 0x29
+ *                                      ├─ ch1 → VL53L5CX (front, 8×8) @ 0x29
+ *                                      │        Vendor ULD; no DT node, code
+ *                                      │        grabs the channel-bus device by
+ *                                      │        alias and passes it in.
+ *                                      ├─ ch2 → VL53L1X  (down, 45°)  @ 0x29
+ *                                      ├─ ch3 → BNO055   (9-DOF IMU)  @ 0x28
+ *                                      │        Adafruit BFF runs in stock
+ *                                      │        I²C mode (PS1=PS0=0); the BMP280
+ *                                      │        on the same BFF (0x77) is
+ *                                      │        present but unused.
+ *                                      └─ ch4..ch7 → spare
  *
- *   1. App pulls XSHUT low      → VL53L1X off-bus
- *   2. App inits VL53L5CX at 0x29 and renames it to 0x2A (vendor ULD)
- *   3. App releases the deferred Zephyr VL53L1X driver via device_init()
- *      → driver pulls XSHUT high and probes at 0x29
+ * The address conflict between the three ToFs (all default to 7-bit 0x29) is
+ * dissolved by the mux — each lives at 0x29 on its own virtual bus and
+ * `i2c-mux-idle-disconnect` keeps stray writes off the other channels.
  *
- * The Zephyr in-tree driver does not natively support runtime address
- * change; the VL53L5CX ULD does, so we move that one. After a power-cycle
- * the VL53L5CX boots back at 0x29 and the dance repeats.
+ * The BNO055 replaces the previous LSM6DSO + LIS2MDL + Madgwick stack — its
+ * onboard NDOF fusion provides the body→world quaternion directly. It has no
+ * in-tree Zephyr driver; our wrapper takes the mux ch3 virtual bus device and
+ * talks register-level I²C against 0x28.
  *
- * Pin assignments on the XIAO ESP32-S3 connector:
- *   D2 (GPIO0_3)  →  I²C0 SDA               (was unused; D4 SDA dead)
- *   D3 (GPIO0_4)  →  I²C0 SCL               (was unused; D5 SCL dead)
- *   D7 (GPIO1_12) →  VL53L1X XSHUT          (= ESP32-S3 GPIO44; UART0
- *                                            RX by default but we use
- *                                            USB-Serial-JTAG so it's free)
+ * Pin map (XIAO header):
+ *   D2 (GPIO3)  → I²C0 SDA       (strapping pin, held high by Qwiic pull-ups)
+ *   D3 (GPIO4)  → I²C0 SCL
+ *   D0, D1, D6..D10              free (no UART link — the prior UART1 route is
+ *                                gone now that the IMU lives on the mux).
  *
- * GPIO3 (D2) is an ESP32-S3 strapping pin (JTAG/USB-Serial-JTAG select).
- * It must be HIGH at reset, which the Qwiic bus's 10 kΩ pull-ups
- * provide for free — so this re-map is safe for boot. Verify on the
- * scope that SDA is ≥ 3.0 V at idle if you ever see strange boot
- * behaviour (download mode loop, console missing).
- *
- * VL53L1X mounting: optical axis tilted +20° above world horizontal.
- * Combined with the chest-pin's −8° downtilt that holds the VL53L5CX,
- * the VL53L1X's mounting plane is +28° relative to the main pin face.
- * Detection envelope at a 1.35 m sensor mount height catches doorframes
- * (2.0–2.1 m) anywhere from ~1 m to ~2.5 m forward — see
- * Docs/Implementation/09_head_clearance.md for the geometry.
+ * Mounting (worn pose):
+ *   VL53L5CX (front) : −8°  downtilt
+ *   VL53L1X  (head)  : +20° uptilt
+ *   VL53L1X  (down)  : 45°  below horizontal (see HAPNAV_DOWN_TOF_DOWNTILT_DEG
+ *                      in dropoff.h)
  */
 
 #include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
 
 &pinctrl {
 	/*
-	 * Re-define the board-default i2c0_default pinctrl group with the
-	 * new GPIO assignments. The ESP32-S3's GPIO matrix lets I²C0 land
-	 * on any GPIO; we point it at GPIO3 (D2) and GPIO4 (D3).
+	 * I²C0 re-mapped onto D2/D3 — the board-default D4/D5 pads tested
+	 * dead on this prototype. The ESP32-S3 GPIO matrix lets I²C0 land on
+	 * any GPIO.
 	 */
 	i2c0_default: i2c0_default {
 		group1 {
@@ -67,21 +60,68 @@
 
 &i2c0 {
 	status = "okay";
-	clock-frequency = <I2C_BITRATE_FAST>;	/* 400 kHz */
+	clock-frequency = <I2C_BITRATE_FAST>;
 	pinctrl-0 = <&i2c0_default>;
 	pinctrl-names = "default";
 
-	tof_head: vl53l1x@29 {
-		compatible = "st,vl53l1x";
-		reg = <0x29>;
+	tof_mux: tca9548a@70 {
+		compatible = "ti,tca9548a";
+		reg = <0x70>;
 		status = "okay";
-		zephyr,deferred-init;
-		xshut-gpios = <&gpio1 12 GPIO_ACTIVE_HIGH>;	/* D7 */
+		#address-cells = <1>;
+		#size-cells = <0>;
+		i2c-mux-idle-disconnect;
+
+		mux_ch0: mux_i2c@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			tof_head: vl53l1x@29 {
+				compatible = "st,vl53l1x";
+				reg = <0x29>;
+				status = "okay";
+				zephyr,deferred-init;
+			};
+		};
+
+		tof_front_bus: mux_i2c@1 {
+			reg = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			/* VL53L5CX runs on this bus via the vendor ULD — no
+			 * DT node, just the bus device looked up by alias. */
+		};
+
+		mux_ch2: mux_i2c@2 {
+			reg = <2>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			tof_down: vl53l1x@29 {
+				compatible = "st,vl53l1x";
+				reg = <0x29>;
+				status = "okay";
+				zephyr,deferred-init;
+			};
+		};
+
+		imu_bus: mux_i2c@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			/* BNO055 (and BFF BMP280) hang off this channel — no
+			 * DT nodes; bno055.c grabs the bus device by alias and
+			 * speaks register-level I²C. */
+		};
 	};
 };
 
 / {
 	aliases {
-		hapnav-tof-head = &tof_head;
+		hapnav-tof-front-bus = &tof_front_bus;
+		hapnav-tof-head      = &tof_head;
+		hapnav-tof-down      = &tof_down;
+		hapnav-imu-bus       = &imu_bus;
 	};
 };

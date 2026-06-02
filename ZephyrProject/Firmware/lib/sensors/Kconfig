@@ -5,41 +5,54 @@
 menu "HapNav sensors"
 
 config HAPNAV_DROPOFF
-	bool "Run the drop-off (cliff) detector"
+	bool "Run the down-ToF drop-off (cliff) detector"
 	default y
 	help
-	  Toggles the world-frame floor-strike check that raises
-	  HAPNAV_OBS_FLAG_DROPOFF when the ToF rays that "should hit floor"
-	  return either invalid status or a slant range much further than
-	  the predicted floor intercept.
+	  Toggles the down-pointing-VL53L1X residual check that raises
+	  HAPNAV_OBS_FLAG_DROPOFF when the floor slant range jumps clear of
+	  a slow-tracked baseline for several consecutive frames. The slow
+	  baseline tracks gradual slopes (inclines/declines) so only step
+	  changes — a cliff edge, a missing step — actually fire.
 
-	  Disable (=n) for bench-demo builds where the physical geometry
-	  doesn't match the worn pose that bench mode assumes — most rays
-	  will then look forward across the desk into the room beyond, and
-	  the detector will fire DROPOFF on essentially every frame.
+	  Disable (=n) for bench-demo builds where the down ToF's geometry
+	  is meaningless (the pin doesn't sit at chest height above a real
+	  floor). Combined with CONFIG_HAPNAV_DOWN_TOF=n the down sensor is
+	  also skipped at init so it doesn't ride the I²C bus for nothing.
 
 	  The wristband's DROPOFF override (the all-4 square wave) takes
-	  precedence over the urgency pulses, so a stuck-on drop-off
-	  cue blocks the lateral-obstacle demo. With this disabled,
-	  HAPNAV_OBS_FLAG_DROPOFF is never set, the override doesn't fire,
-	  and the wristband shows urgency-driven pulses cleanly.
+	  precedence over the urgency knocks, so a stuck-on drop-off cue
+	  blocks the lateral-obstacle feel. With this disabled,
+	  HAPNAV_OBS_FLAG_DROPOFF is never set and the wristband shows
+	  urgency knocks cleanly.
 
 config HAPNAV_HEAD_TOF
 	bool "Enable the head-clearance VL53L1X sensor"
 	default y
 	help
-	  When disabled (=n), pin_sensors_init() skips device_init() on the
+	  When disabled (=n), pin_sensors_init() skips bring-up of the head
 	  VL53L1X and pin_sensors_sample() leaves head_distance_mm = -1
 	  permanently. The HAPNAV_OBS_FLAG_HEAD_OBSTACLE flag is therefore
 	  never raised, and the wristband never sees the head-clearance
 	  pattern.
 
-	  XSHUT is still pulled low at boot regardless of this option, so a
-	  VL53L1X that's physically wired and powered stays in reset and
-	  can't contend with the VL53L5CX at 0x29.
-
 	  Useful for bench demos where the VL53L5CX alone is wide enough
 	  (±22.3° per axis) to cover the 10–20 cm working volume.
+
+config HAPNAV_DOWN_TOF
+	bool "Enable the down-pointing VL53L1X sensor"
+	default y
+	help
+	  When disabled (=n), pin_sensors_init() skips bring-up of the down
+	  VL53L1X (mux ch2) and the down-pointing dropoff detector is muted.
+
+	  The down ToF only makes geometric sense in the worn pose (pin
+	  upright at chest, ~1.35 m above the floor, sensor pointing forward
+	  and ~45° down). In bench mode the desk's ~5 cm of clearance gives
+	  meaningless slant ranges; disable then.
+
+	  CONFIG_HAPNAV_DROPOFF must also be enabled for the dropoff flag to
+	  actually fire; this knob only controls whether the down sensor is
+	  brought up and polled.
 
 config HAPNAV_BENCH_MODE
 	bool "Bench-demo geometry (sensor sits on a desk)"

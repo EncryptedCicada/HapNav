@@ -11,14 +11,10 @@ set(VL53L5CX_PORT_DIR ${CMAKE_CURRENT_LIST_DIR}/vendor/vl53l5cx)
 # We attach to the app target rather than creating a separate Zephyr library
 # so the sources pick up Zephyr's autoconf, kernel headers, and compile flags.
 target_sources(app PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/src/lsm6dso.c
-    ${CMAKE_CURRENT_LIST_DIR}/src/lis2mdl.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/bno055.c
     ${CMAKE_CURRENT_LIST_DIR}/src/vl53l5cx.c
-    ${CMAKE_CURRENT_LIST_DIR}/src/madgwick.c
     ${CMAKE_CURRENT_LIST_DIR}/src/obstacle.c
     ${CMAKE_CURRENT_LIST_DIR}/src/dropoff.c
-    ${STDRV_DIR}/lsm6dso-pid/lsm6dso_reg.c
-    ${STDRV_DIR}/lis2mdl-pid/lis2mdl_reg.c
     ${VL53L5CX_ULD_DIR}/vl53l5cx_api.c
     ${VL53L5CX_PORT_DIR}/platform.c
 )
@@ -28,7 +24,5 @@ target_sources(app PRIVATE
 target_include_directories(app PRIVATE
     ${VL53L5CX_PORT_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/include
-    ${STDRV_DIR}/lsm6dso-pid
-    ${STDRV_DIR}/lis2mdl-pid
     ${VL53L5CX_ULD_DIR}
 )

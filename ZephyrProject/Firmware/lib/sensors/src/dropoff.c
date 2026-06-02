@@ -1,78 +1,64 @@
 #include <hapnav/dropoff.h>
 
-#include <math.h>
+/* EMA alpha for the baseline, expressed as a small rational so we don't
+ * pull a libm divide in for a single line. 0.1/frame at 20 Hz gives a
+ * time-constant of ~0.5 s — fast enough to track posture and slope drift,
+ * slow enough that a cliff edge stays clear of it long enough to flag. */
+#define BASELINE_ALPHA_NUM    1
+#define BASELINE_ALPHA_DEN   10
 
-/* Require ray to point at least ~11.5° below horizontal in world frame
- * (sin ≈ 0.20) to count as a "ground ray". With the user upright and 8°
- * sensor downtilt, three bottom rows clear this; pitching down adds more,
- * pitching up drops some — both are correct behaviours. */
-#define MIN_FLOOR_RAY_DOWN_SIN  0.20f
+/* Slant range jumping >= 200 mm above the baseline = floor gone. */
+#define DROPOFF_THRESH_MM    200
 
-/* Predicted floor slant-range cutoff. Past this we'd be reasoning about
- * floor outside our useful operating range, where missing returns are
- * uninformative. Bench-mode scales this down to a 50 cm envelope so the
- * geometry matches the BENCH_MODE constants in obstacle.c. */
-#if defined(CONFIG_HAPNAV_BENCH_MODE)
-#define PREDICTED_RANGE_CUTOFF_M  0.5f
-#else
-#define PREDICTED_RANGE_CUTOFF_M  3.5f
-#endif
+/* 3 consecutive frames at 20 Hz = 150 ms — long enough to ride out a
+ * noisy reading, short enough to fire before the foot lands. */
+#define DROPOFF_MIN_STREAK   3
 
-/* Measured-vs-predicted ratio above which we judge the floor is gone. */
-#define DROPOFF_RANGE_RATIO  1.30f
+/* Past this slant the VL53L1X default mode isn't trustworthy; treat as
+ * no-update rather than as "saw a cliff". */
+#define MAX_TRUSTED_MM      3500
 
-/* How many pixels both eligible as floor rays AND missing the expected
- * return we need before flagging DROPOFF, and whether invalid-status
- * pixels count as "missing". Bench setups are noisy (lots of status=255
- * even on a healthy desk) so we raise the bar and require an actual
- * valid-but-too-far reading rather than counting invalid pixels. */
-#if defined(CONFIG_HAPNAV_BENCH_MODE)
-#define MIN_DROPOFF_PIXELS      8
-#define DROPOFF_COUNT_INVALID   false
-#else
-#define MIN_DROPOFF_PIXELS      3
-#define DROPOFF_COUNT_INVALID   true
-#endif
-
-bool hapnav_dropoff_check(const int16_t distances_mm[HAPNAV_TOF_ZONES],
-			  const uint8_t target_status[HAPNAV_TOF_ZONES],
-			  const float   ray_W[HAPNAV_TOF_ZONES][3],
-			  float         sensor_height_m)
+void hapnav_dropoff_init(struct hapnav_dropoff_state *s)
 {
-	int floor_ray_pixels = 0;
-	int dropoff_pixels   = 0;
+	s->baseline_mm    = 0.0f;
+	s->baseline_valid = false;
+	s->streak         = 0;
+}
 
-	for (int i = 0; i < HAPNAV_TOF_ZONES; i++) {
-		float rz = ray_W[i][2];   /* world Z; negative = pointing down */
-		if (rz > -MIN_FLOOR_RAY_DOWN_SIN) {
-			continue;          /* not enough downward tilt */
-		}
+bool hapnav_dropoff_check_down(struct hapnav_dropoff_state *s,
+			       int16_t slant_mm,
+			       float   sensor_height_m,
+			       float   pitch_rad)
+{
+	(void)sensor_height_m;   /* reserved for future absolute-mode fallback */
+	(void)pitch_rad;         /* reserved for posture compensation */
 
-		/* Slant range from sensor to a flat floor at z = -sensor_height_m. */
-		float predicted = sensor_height_m / (-rz);
-		if (predicted > PREDICTED_RANGE_CUTOFF_M) {
-			continue;          /* floor would be outside useful range */
-		}
-
-		floor_ray_pixels++;
-
-		uint8_t s = target_status[i];
-		bool status_ok = (s == 5 || s == 6 || s == 9);
-
-		bool floor_missing = false;
-		if (!status_ok) {
-			/* Bench mode: invalid pixels are noise, not cliff. */
-			floor_missing = DROPOFF_COUNT_INVALID;
-		} else {
-			float r_m = distances_mm[i] * 0.001f;
-			floor_missing = (r_m > predicted * DROPOFF_RANGE_RATIO);
-		}
-
-		if (floor_missing) {
-			dropoff_pixels++;
-		}
+	if (slant_mm < 0 || slant_mm > MAX_TRUSTED_MM) {
+		s->streak = 0;
+		return false;
 	}
 
-	return (floor_ray_pixels >= MIN_DROPOFF_PIXELS &&
-		dropoff_pixels    >= MIN_DROPOFF_PIXELS);
+	float meas = (float)slant_mm;
+
+	if (!s->baseline_valid) {
+		s->baseline_mm    = meas;
+		s->baseline_valid = true;
+		s->streak         = 0;
+		return false;
+	}
+
+	float residual = meas - s->baseline_mm;
+
+	if (residual > (float)DROPOFF_THRESH_MM) {
+		/* Floor disappeared — keep the streak running and freeze the
+		 * baseline so it doesn't drift up to meet the cliff. */
+		s->streak++;
+	} else {
+		s->streak = 0;
+		s->baseline_mm +=
+			(meas - s->baseline_mm) *
+			BASELINE_ALPHA_NUM / (float)BASELINE_ALPHA_DEN;
+	}
+
+	return (s->streak >= DROPOFF_MIN_STREAK);
 }

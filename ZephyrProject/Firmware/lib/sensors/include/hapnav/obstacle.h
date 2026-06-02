@@ -11,7 +11,7 @@
  * Stages:
  *   1.  per-pixel validity mask (status flag + range bounds)
  *   2.  pre-computed sensor-frame ray table with 45° roll and downtilt baked in
- *   3.  rotate every ray into world frame using the Madgwick quaternion
+ *   3.  rotate every ray into world frame using the BNO055 fusion quaternion
  *   4.  classify zones as floor / ceiling / candidate (height-banded)
  *   5.  per-azimuth-bin nearest-obstacle search with a small support test
  *   6.  closing-rate estimate per bin (frame-to-frame Δrange)
@@ -29,7 +29,7 @@
 void hapnav_obstacle_init(void);
 
 /*
- * @quat_wxyz             body→world unit quaternion from Madgwick
+ * @quat_wxyz             body→world unit quaternion from BNO055 NDOF fusion
  * @gyro_radps            body-frame angular rates [x, y, z] in rad/s
  * @accel_g               body-frame acceleration [x, y, z] in g (incl. gravity)
  * @head_distance_mm      latest VL53L1X reading in mm, or -1 if unavailable.
