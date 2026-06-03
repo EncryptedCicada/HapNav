@@ -12,6 +12,10 @@
 
 LOG_MODULE_REGISTER(pin_ble, LOG_LEVEL_INF);
 
+/* 10 × 1.25 ms = 12.5 ms connection interval → ~80 Hz frame delivery.
+ * Matches the 12 ms pin sample period; keeps latency under 13 ms. */
+#define HAPNAV_CONN_PARAM BT_LE_CONN_PARAM(10, 10, 0, 400)
+
 static struct bt_uuid_128 svc_uuid   = BT_UUID_INIT_128(HAPNAV_UUID_SVC_VAL);
 static struct bt_uuid_128 frame_uuid = BT_UUID_INIT_128(HAPNAV_UUID_FRAME_VAL);
 
@@ -137,7 +141,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 	}
 
 	int err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN,
-				    BT_LE_CONN_PARAM_DEFAULT, &default_conn);
+				    HAPNAV_CONN_PARAM, &default_conn);
 	if (err) {
 		LOG_ERR("Create conn failed: %d", err);
 		start_scan();
