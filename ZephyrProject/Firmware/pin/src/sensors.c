@@ -362,6 +362,31 @@ static inline float quat_pitch(const float q[4])
 	return asinf(sinp);
 }
 
+static void obs_flags_str(uint8_t flags, char *buf, size_t len)
+{
+	if (!flags) {
+		snprintf(buf, len, "CLEAR");
+		return;
+	}
+	static const struct { uint8_t bit; const char *name; } map[] = {
+		{ HAPNAV_OBS_FLAG_STATIONARY,     "STATIONARY" },
+		{ HAPNAV_OBS_FLAG_SENSOR_BLOCKED, "BLOCKED"    },
+		{ HAPNAV_OBS_FLAG_MOSTLY_INVALID, "INVALID"    },
+		{ HAPNAV_OBS_FLAG_YAW_SLEWING,    "YAW"        },
+		{ HAPNAV_OBS_FLAG_DROPOFF,        "DROPOFF"    },
+		{ HAPNAV_OBS_FLAG_HEAD_OBSTACLE,  "HEAD"       },
+	};
+	int pos = 0;
+	bool first = true;
+	for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+		if (flags & map[i].bit) {
+			pos += snprintf(buf + pos, len - pos,
+					"%s%s", first ? "" : "|", map[i].name);
+			first = false;
+		}
+	}
+}
+
 int pin_sensors_sample(struct hapnav_frame *out)
 {
 	memset(out, 0, sizeof(*out));
@@ -431,14 +456,17 @@ int pin_sensors_sample(struct hapnav_frame *out)
 	/* ── Trace ──────────────────────────────────────────────────────── */
 	{
 		static uint32_t trace_div;
-		bool dump_grid = (trace_div++ % 20) == 0;   /* 1 Hz at 20 Hz */
+		bool dump_grid = (trace_div++ % 83) == 0;   /* ~1 Hz at 83 Hz */
 		const struct hapnav_obstacles *o = &out->obstacles;
+
+		char flags_str[48];
+		obs_flags_str(o->flags, flags_str, sizeof(flags_str));
 
 		printk("PIN {\"ts\":%u,"
 		       "\"a\":[%.3f,%.3f,%.3f],\"g\":[%.3f,%.3f,%.3f],"
 		       "\"q\":[%.3f,%.3f,%.3f,%.3f],"
-		       "\"head\":%d,\"down\":%d,"
-		       "\"obs\":{\"urg\":[%u,%u,%u,%u],\"near\":%d,\"flags\":\"0x%02x\"}",
+		       "\"head\":%d mm,\"down\":%d mm,"
+		       "\"obs\":{\"urg\":[%u,%u,%u,%u],\"near\":%d,\"flags\":\"0x%02x(%s)\"}",
 		       out->timestamp_ms,
 		       (double)accel_g[0], (double)accel_g[1], (double)accel_g[2],
 		       (double)gyro_radps[0], (double)gyro_radps[1], (double)gyro_radps[2],
@@ -446,7 +474,7 @@ int pin_sensors_sample(struct hapnav_frame *out)
 		       (double)out->quat[2], (double)out->quat[3],
 		       (int)head_distance_mm, (int)down_distance_mm,
 		       o->urgency[0], o->urgency[1], o->urgency[2], o->urgency[3],
-		       (int)o->nearest_range_mm, (unsigned)o->flags);
+		       (int)o->nearest_range_mm, (unsigned)o->flags, flags_str);
 
 		if (dump_grid) {
 			printk(",\"d\":[");
