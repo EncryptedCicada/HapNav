@@ -64,6 +64,14 @@ TOF_BOARD = BoardConfig(
     fallback_color=(0, 100, 0, 255),  # Green
 )
 
+# Head VL53L1X: 20° uptilt from forward axis (mux ch0)
+HEAD_TOF_TILT_UP_DEG = 20.0
+HEAD_TOF_MAX_RANGE_MM = 2200   # warn (turn red) within this range
+
+# Down VL53L1X: 45° downtilt from forward axis (mux ch2)
+DOWN_TOF_TILT_DOWN_DEG = 45.0
+DOWN_TOF_MAX_RANGE_MM = 4000
+
 # Visualization settings
 TARGET_FPS = 30  # Target visualization frame rate
 FRAME_TIME = 1.0 / TARGET_FPS  # Time per frame in seconds

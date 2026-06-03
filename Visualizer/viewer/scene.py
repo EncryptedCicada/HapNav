@@ -1,5 +1,6 @@
 """Viser scene setup for VL53L5CX viewer."""
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +47,10 @@ class SceneHandles:
     tof_mesh: viser.MeshHandle
     tof_sensor: viser.FrameHandle
     zone_rays: list
+    head_beam: object   # spline handle for head VL53L1X beam
+    head_dot: object    # point cloud handle for head endpoint
+    down_beam: object   # spline handle for down VL53L1X beam
+    down_dot: object    # point cloud handle for down endpoint
 
 
 def create_grid(server: viser.ViserServer, size: float = 2.0) -> list:
@@ -182,6 +187,9 @@ def create_scene_hierarchy(
     # Zone rays as children of ToF sensor (in sensor-local coordinates)
     zone_rays = _create_zone_rays(server, zone_angles)
 
+    # Head + down VL53L1X beams (also children of ToF sensor frame)
+    head_beam, head_dot, down_beam, down_dot = create_sensor_beams(server)
+
     return SceneHandles(
         breadboard=breadboard,
         imu_board=imu_board,
@@ -191,7 +199,71 @@ def create_scene_hierarchy(
         tof_mesh=tof_mesh,
         tof_sensor=tof_sensor,
         zone_rays=zone_rays,
+        head_beam=head_beam,
+        head_dot=head_dot,
+        down_beam=down_beam,
+        down_dot=down_dot,
     )
+
+
+def create_sensor_beams(
+    server: viser.ViserServer,
+    head_mm: int = -1,
+    down_mm: int = -1,
+    obs_flags: int = 0,
+) -> tuple:
+    """Create or update the head and down VL53L1X sensor beam visualizations.
+
+    Beams are children of /breadboard/tof/sensor/ so they rotate with the
+    IMU exactly like the zone rays.
+
+    Returns (head_beam, head_dot, down_beam, down_dot) handles.
+    """
+    max_m = config.MAX_RANGE_MM / 1000.0
+
+    # Head: 20° uptilt from +z (forward), beam in the +y/+z quadrant
+    head_tilt = math.radians(config.HEAD_TOF_TILT_UP_DEG)
+    head_dir = np.array([0.0, math.sin(head_tilt), math.cos(head_tilt)], dtype=np.float32)
+    head_dist_m = (head_mm / 1000.0) if head_mm > 0 else max_m
+    head_obstacle = 0 < head_mm <= config.HEAD_TOF_MAX_RANGE_MM
+    head_color = (255, 60, 60) if head_obstacle else (0, 220, 255)
+    head_end = head_dir * head_dist_m
+
+    head_beam = server.scene.add_spline_catmull_rom(
+        "/breadboard/tof/sensor/head/beam",
+        positions=np.array([[0.0, 0.0, 0.0], head_end], dtype=np.float32),
+        color=head_color,
+        line_width=3.0,
+    )
+    head_dot = server.scene.add_point_cloud(
+        "/breadboard/tof/sensor/head/dot",
+        points=np.array([head_end], dtype=np.float32),
+        colors=np.array([list(head_color)], dtype=np.uint8),
+        point_size=0.015,
+    )
+
+    # Down: 45° downtilt from +z, beam in the −y/+z quadrant
+    down_tilt = math.radians(config.DOWN_TOF_TILT_DOWN_DEG)
+    down_dir = np.array([0.0, -math.sin(down_tilt), math.cos(down_tilt)], dtype=np.float32)
+    down_dist_m = (down_mm / 1000.0) if down_mm > 0 else max_m
+    dropoff = bool(obs_flags & 0x10)
+    down_color = (255, 90, 0) if dropoff else (255, 210, 0)
+    down_end = down_dir * down_dist_m
+
+    down_beam = server.scene.add_spline_catmull_rom(
+        "/breadboard/tof/sensor/down/beam",
+        positions=np.array([[0.0, 0.0, 0.0], down_end], dtype=np.float32),
+        color=down_color,
+        line_width=3.0,
+    )
+    down_dot = server.scene.add_point_cloud(
+        "/breadboard/tof/sensor/down/dot",
+        points=np.array([down_end], dtype=np.float32),
+        colors=np.array([list(down_color)], dtype=np.uint8),
+        point_size=0.015,
+    )
+
+    return head_beam, head_dot, down_beam, down_dot
 
 
 def _create_zone_rays(

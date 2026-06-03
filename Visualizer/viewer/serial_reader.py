@@ -28,6 +28,9 @@ class SerialReader:
         self.status = np.zeros(config.NUM_ZONES, dtype=np.uint8)
         self.quaternion = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)  # wxyz identity
         self._imu_connected = False  # True if IMU data has been received
+        self.head_mm: int = -1    # VL53L1X head sensor range (-1 = no data)
+        self.down_mm: int = -1    # VL53L1X down sensor range (-1 = no data)
+        self.obs_flags: int = 0   # HAPNAV_OBS_FLAG_* bitmask
         self._data_lock = threading.Lock()
 
         # FPS tracking
@@ -181,6 +184,17 @@ class SerialReader:
                                             self._imu_connected = True
                                         else:
                                             logger.debug("No quaternion data in packet (IMU may not be connected or firmware outdated)")
+                                        # VL53L1X head + down ranges and obstacle flags
+                                        if "head_mm" in data:
+                                            self.head_mm = int(data["head_mm"])
+                                        if "down_mm" in data:
+                                            self.down_mm = int(data["down_mm"])
+                                        if "flags" in data:
+                                            try:
+                                                raw = str(data["flags"])
+                                                self.obs_flags = int(raw.split("(")[0], 16)
+                                            except (ValueError, IndexError):
+                                                pass
                                     # Track data FPS
                                     self._frame_count += 1
                                     now = time.time()

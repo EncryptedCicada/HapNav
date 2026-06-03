@@ -21,7 +21,7 @@ from .geometry import (
     get_colors,
 )
 from .logging_config import setup_logging
-from .scene import create_grid, create_scene_hierarchy, update_zone_rays
+from .scene import create_grid, create_scene_hierarchy, create_sensor_beams, update_zone_rays
 from .serial_reader import SerialReader
 
 logger = logging.getLogger("vl53l5cx_viewer.main")
@@ -124,6 +124,14 @@ class VL53L5CXViewer:
             self.distance_text = server.gui.add_text("Status", initial_value="Waiting...")
             self.freq_text = server.gui.add_text("Frequency (Hz)", initial_value="0")
             self.imu_status_text = server.gui.add_text("IMU", initial_value="Not detected")
+
+        with server.gui.add_folder("VL53L1X Sensors"):
+            self.head_sensor_text = server.gui.add_text(
+                "Head (ch0, +20°)", initial_value="-- mm"
+            )
+            self.down_sensor_text = server.gui.add_text(
+                "Down (ch2, -45°)", initial_value="-- mm"
+            )
 
         with server.gui.add_folder("Settings"):
             self.point_size_slider = server.gui.add_slider(
@@ -276,11 +284,36 @@ class VL53L5CXViewer:
             self.scene.tof_board.position = tuple(self.tof_board_center)
             return None
 
+    def _update_sensor_beams(
+        self, server: viser.ViserServer,
+        head_mm: int, down_mm: int, obs_flags: int,
+    ) -> None:
+        """Redraw head and down VL53L1X beams with current distances and flags."""
+        _, _, _, _ = create_sensor_beams(server, head_mm, down_mm, obs_flags)
+
+        self.head_sensor_text.value = (
+            f"{head_mm} mm  ⚠ OBSTACLE" if 0 < head_mm <= config.HEAD_TOF_MAX_RANGE_MM
+            else f"{head_mm} mm" if head_mm > 0
+            else "no data"
+        )
+        self.down_sensor_text.value = (
+            f"{down_mm} mm  ⚠ DROPOFF" if obs_flags & 0x10
+            else f"{down_mm} mm" if down_mm > 0
+            else "no data"
+        )
+
     def _process_frame(
         self, server: viser.ViserServer, mapping_state: MappingState, plane_handle
     ):
         """Process a single frame of sensor data."""
         distances, status, quaternion = self.serial_reader.get_data()
+
+        self._update_sensor_beams(
+            server,
+            self.serial_reader.head_mm,
+            self.serial_reader.down_mm,
+            self.serial_reader.obs_flags,
+        )
 
         if self.filter_checkbox.value:
             distances = self.temporal_filter.apply(distances, self.filter_strength_slider.value)
