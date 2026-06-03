@@ -51,12 +51,13 @@ static const char *const role[HAPTICS_NUM_CH] = {
 
 /* ── Drive-policy tuning ───────────────────────────────────────────────── */
 
-/* 20 Hz drive update — twice the pin's sample rate so smoothing, drop-off
- * pulse, and fatigue evolve on a stable clock independent of BLE jitter. */
-#define DRIVE_PERIOD_MS         50
+/* 50 Hz drive update — cuts worst-case frame-to-motor latency from 50 ms
+ * to 20 ms while keeping the knock/dropoff/head absolute timings the same
+ * (tick constants scaled accordingly). */
+#define DRIVE_PERIOD_MS         20
 
-/* If we haven't seen a frame in this long, mute everything. The pin
- * samples at 10 Hz (100 ms), so 250 ms means ~2 missed frames. */
+/* If we haven't seen a frame in this long, mute everything.
+ * 250 ms ≈ 20 missed frames at the pin's 83 Hz send rate. */
 #define WATCHDOG_MS             250
 
 /* Below this raw urgency, the channel is silent — keeps the wristband
@@ -77,8 +78,8 @@ static const char *const role[HAPTICS_NUM_CH] = {
  * harder, not faster. A single global knock clock keeps every channel
  * tapping in unison, so direction reads as a left/right strength difference
  * within one knock instead of an out-of-phase stutter. */
-#define KNOCK_ON_TICKS          1    /* 50 ms tap                          */
-#define KNOCK_PERIOD_TICKS      7    /* 350 ms cycle ≈ 2.9 knocks/s        */
+#define KNOCK_ON_TICKS          2    /* 2 × 20 ms = 40 ms tap              */
+#define KNOCK_PERIOD_TICKS      18   /* 18 × 20 ms = 360 ms ≈ 2.8 knocks/s */
 
 /* While the user is turning, dampen drive rather than muting outright by
  * scaling the target amplitude down to 40 %. */
@@ -86,13 +87,13 @@ static const char *const role[HAPTICS_NUM_CH] = {
 #define YAW_SLEW_GAIN_DEN       5    /* 40 % */
 
 /* Drop-off pattern: 150 ms on / 150 ms off, all four channels in lock-step. */
-#define DROPOFF_HALF_TICKS      3    /* 3 * 50 ms                          */
+#define DROPOFF_HALF_TICKS      8    /* 8 × 20 ms = 160 ms                 */
 
 /* Head-obstacle pattern: faster pulse than drop-off so the two cliff-edge
  * cues stay perceptually distinct. 50 ms on / 50 ms off → 10 Hz on the
  * outer (LEFT+RIGHT) channels only; centre channels are left muted so the
  * "ducking" feel is associated with the bracketing pair. */
-#define HEAD_HALF_TICKS         1    /* 1 * 50 ms                          */
+#define HEAD_HALF_TICKS         2    /* 2 × 20 ms = 40 ms                  */
 
 /* Fatigue model: 5 s leaky bucket per channel that fills while the channel
  * is driven (amplitude > 0) and leaks while idle. Above 70 % bucket fill we
@@ -335,7 +336,7 @@ static void worker_tick(struct k_work *work)
 	 * bucket fill — the four numbers that fully describe what the
 	 * policy is doing right now. */
 	static uint8_t trace_div;
-	if (++trace_div >= 4) {
+	if (++trace_div >= 10) {
 		trace_div = 0;
 		const struct hapnav_obstacles *o = &snap.obs;
 		printk("DRIVE urg=[%u %u %u %u] flags=0x%02x stale=%d "
