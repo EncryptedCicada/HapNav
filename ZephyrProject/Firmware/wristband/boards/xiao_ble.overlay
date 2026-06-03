@@ -43,10 +43,34 @@
 			lra_l: da7280@4a {
 				compatible = "dlg,da7280";
 				reg = <0x4a>;
+				/*
+				 * Vybronics VLV101040A coin LRA — tuned from the
+				 * Renesas reference register dump in
+				 * TempRefs/VLV101040A_config/VLV101040A_config.txt.
+				 *
+				 * Reference dump:
+				 *   ACTUATOR1=0x6B → nom 2.48 V RMS
+				 *   ACTUATOR2=0x6B → abs-max 2.48 V RMS
+				 *   ACTUATOR3=0x1F → imax 244.6 mA
+				 *   FRQ_LRA_PER_H/L = 0x22/0x3C → ~170 Hz
+				 *   TOP_CFG1 bits 3,4 set → FREQ_TRACK + BEMF
+				 *   TOP_CFG2[3:0]=1 → full-brake-thr=1
+				 *
+				 * On top of that we keep our own acc-enable and
+				 * rapid-stop-enable (Renesas leaves both off) so
+				 * the knock-style pulses get a quick attack and a
+				 * crisp brake between knocks.
+				 */
 				dlg,actuator-type = "LRA";
 				dlg,resonant-freq-hz = <170>;
+				dlg,nom-microvolt     = <2480000>;
+				dlg,abs-max-microvolt = <2480000>;
+				dlg,imax-microamp     = <244600>;
+				dlg,bemf-sens-enable;
+				dlg,freq-track-enable;
 				dlg,acc-enable;
 				dlg,rapid-stop-enable;
+				full-brake-thr = <1>;
 				per-channel-drive-cap = <60>;
 			};
 		};
@@ -59,10 +83,34 @@
 			lra_cl: da7280@4a {
 				compatible = "dlg,da7280";
 				reg = <0x4a>;
+				/*
+				 * Vybronics VLV101040A coin LRA — tuned from the
+				 * Renesas reference register dump in
+				 * TempRefs/VLV101040A_config/VLV101040A_config.txt.
+				 *
+				 * Reference dump:
+				 *   ACTUATOR1=0x6B → nom 2.48 V RMS
+				 *   ACTUATOR2=0x6B → abs-max 2.48 V RMS
+				 *   ACTUATOR3=0x1F → imax 244.6 mA
+				 *   FRQ_LRA_PER_H/L = 0x22/0x3C → ~170 Hz
+				 *   TOP_CFG1 bits 3,4 set → FREQ_TRACK + BEMF
+				 *   TOP_CFG2[3:0]=1 → full-brake-thr=1
+				 *
+				 * On top of that we keep our own acc-enable and
+				 * rapid-stop-enable (Renesas leaves both off) so
+				 * the knock-style pulses get a quick attack and a
+				 * crisp brake between knocks.
+				 */
 				dlg,actuator-type = "LRA";
 				dlg,resonant-freq-hz = <170>;
+				dlg,nom-microvolt     = <2480000>;
+				dlg,abs-max-microvolt = <2480000>;
+				dlg,imax-microamp     = <244600>;
+				dlg,bemf-sens-enable;
+				dlg,freq-track-enable;
 				dlg,acc-enable;
 				dlg,rapid-stop-enable;
+				full-brake-thr = <1>;
 				per-channel-drive-cap = <60>;
 			};
 		};
@@ -75,10 +123,34 @@
 			lra_cr: da7280@4a {
 				compatible = "dlg,da7280";
 				reg = <0x4a>;
+				/*
+				 * Vybronics VLV101040A coin LRA — tuned from the
+				 * Renesas reference register dump in
+				 * TempRefs/VLV101040A_config/VLV101040A_config.txt.
+				 *
+				 * Reference dump:
+				 *   ACTUATOR1=0x6B → nom 2.48 V RMS
+				 *   ACTUATOR2=0x6B → abs-max 2.48 V RMS
+				 *   ACTUATOR3=0x1F → imax 244.6 mA
+				 *   FRQ_LRA_PER_H/L = 0x22/0x3C → ~170 Hz
+				 *   TOP_CFG1 bits 3,4 set → FREQ_TRACK + BEMF
+				 *   TOP_CFG2[3:0]=1 → full-brake-thr=1
+				 *
+				 * On top of that we keep our own acc-enable and
+				 * rapid-stop-enable (Renesas leaves both off) so
+				 * the knock-style pulses get a quick attack and a
+				 * crisp brake between knocks.
+				 */
 				dlg,actuator-type = "LRA";
 				dlg,resonant-freq-hz = <170>;
+				dlg,nom-microvolt     = <2480000>;
+				dlg,abs-max-microvolt = <2480000>;
+				dlg,imax-microamp     = <244600>;
+				dlg,bemf-sens-enable;
+				dlg,freq-track-enable;
 				dlg,acc-enable;
 				dlg,rapid-stop-enable;
+				full-brake-thr = <1>;
 				per-channel-drive-cap = <60>;
 			};
 		};
@@ -91,10 +163,34 @@
 			lra_r: da7280@4a {
 				compatible = "dlg,da7280";
 				reg = <0x4a>;
+				/*
+				 * Vybronics VLV101040A coin LRA — tuned from the
+				 * Renesas reference register dump in
+				 * TempRefs/VLV101040A_config/VLV101040A_config.txt.
+				 *
+				 * Reference dump:
+				 *   ACTUATOR1=0x6B → nom 2.48 V RMS
+				 *   ACTUATOR2=0x6B → abs-max 2.48 V RMS
+				 *   ACTUATOR3=0x1F → imax 244.6 mA
+				 *   FRQ_LRA_PER_H/L = 0x22/0x3C → ~170 Hz
+				 *   TOP_CFG1 bits 3,4 set → FREQ_TRACK + BEMF
+				 *   TOP_CFG2[3:0]=1 → full-brake-thr=1
+				 *
+				 * On top of that we keep our own acc-enable and
+				 * rapid-stop-enable (Renesas leaves both off) so
+				 * the knock-style pulses get a quick attack and a
+				 * crisp brake between knocks.
+				 */
 				dlg,actuator-type = "LRA";
 				dlg,resonant-freq-hz = <170>;
+				dlg,nom-microvolt     = <2480000>;
+				dlg,abs-max-microvolt = <2480000>;
+				dlg,imax-microamp     = <244600>;
+				dlg,bemf-sens-enable;
+				dlg,freq-track-enable;
 				dlg,acc-enable;
 				dlg,rapid-stop-enable;
+				full-brake-thr = <1>;
 				per-channel-drive-cap = <60>;
 			};
 		};

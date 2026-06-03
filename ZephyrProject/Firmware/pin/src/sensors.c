@@ -32,7 +32,7 @@ LOG_MODULE_REGISTER(pin_sensors, LOG_LEVEL_INF);
  * transfer.
  */
 
-#define SAMPLE_PERIOD_MS  50            /* 20 Hz */
+#define SAMPLE_PERIOD_MS  12            /* ~83 Hz (4× the previous 20 Hz cadence) */
 #define SAMPLE_DT_S       (SAMPLE_PERIOD_MS / 1000.0f)
 
 /* Head-clearance trigger envelope. Worn-pose default catches doorframes at
@@ -249,6 +249,47 @@ int pin_sensors_init(void)
 			LOG_INF("BNO055 axis remap applied (CONFIG=0x18, SIGN=0x01)");
 		}
 	}
+
+	/* ── Hardware-check summary ─────────────────────────────────────────
+	 * One last block so the boot log makes it instantly obvious which
+	 * sensors landed and which didn't, without scrolling through the
+	 * interleaved per-device init logs. The mux gets its own probe (one
+	 * 1-byte read from 0x70) because nothing else can work without it;
+	 * if it's FAIL, all the ToF rows below it will be FAIL too and the
+	 * "0/3 ToFs ready" result is the keystone-failure diagnostic. */
+	uint8_t mux_probe;
+	const bool mux_ok = (i2c_read(i2c_bus, &mux_probe, 1, 0x70) == 0);
+	const int tofs_ready = (tof_ok ? 1 : 0) +
+			       (tof_head_ok ? 1 : 0) +
+			       (tof_down_ok ? 1 : 0);
+
+	LOG_INF("-- Sensor hardware check -----------------------------------");
+	if (mux_ok) {
+		LOG_INF("  Mux  TCA9548A  @ 0x70  : OK");
+	} else {
+		LOG_WRN("  Mux  TCA9548A  @ 0x70  : FAIL");
+	}
+	if (tof_ok) {
+		LOG_INF("  ch1  VL53L5CX  (front) : OK");
+	} else {
+		LOG_WRN("  ch1  VL53L5CX  (front) : FAIL");
+	}
+	if (tof_head_ok) {
+		LOG_INF("  ch0  VL53L1X   (head)  : OK");
+	} else {
+		LOG_WRN("  ch0  VL53L1X   (head)  : FAIL");
+	}
+	if (tof_down_ok) {
+		LOG_INF("  ch2  VL53L1X   (down)  : OK");
+	} else {
+		LOG_WRN("  ch2  VL53L1X   (down)  : FAIL");
+	}
+	if (tofs_ready == 3) {
+		LOG_INF("  Result: %d/3 ToFs ready", tofs_ready);
+	} else {
+		LOG_WRN("  Result: %d/3 ToFs ready", tofs_ready);
+	}
+	LOG_INF("------------------------------------------------------------");
 
 	return 0;
 }

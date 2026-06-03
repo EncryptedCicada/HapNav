@@ -9,7 +9,7 @@
 #include <SparkFun_VL53L5CX_Library.h>
 #include "SparkFunLSM6DSO.h"
 
-#define VERSION "0.1.0"
+#define VERSION "r.1.0"
 
 #define SDA_PIN 21
 #define SCL_PIN 22

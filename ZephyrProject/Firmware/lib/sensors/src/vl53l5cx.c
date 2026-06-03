@@ -36,7 +36,10 @@ int hapnav_vl53l5cx_init(struct hapnav_vl53l5cx *dev,
 	}
 
 	status |= vl53l5cx_set_resolution(&dev->cfg, VL53L5CX_RESOLUTION_8X8);
-	status |= vl53l5cx_set_ranging_frequency_hz(&dev->cfg, 20);
+	/* 60 Hz is the ULD-documented max at 8x8; the poll loop runs ~83 Hz
+	 * and skips when no fresh frame is ready, so this just maximises how
+	 * often that "ready" check hits. */
+	status |= vl53l5cx_set_ranging_frequency_hz(&dev->cfg, 60);
 	status |= vl53l5cx_set_ranging_mode(&dev->cfg,
 					    VL53L5CX_RANGING_MODE_CONTINUOUS);
 	status |= vl53l5cx_start_ranging(&dev->cfg);
@@ -45,7 +48,7 @@ int hapnav_vl53l5cx_init(struct hapnav_vl53l5cx *dev,
 		return -EIO;
 	}
 
-	LOG_INF("VL53L5CX ready (8x8, 20 Hz, continuous)");
+	LOG_INF("VL53L5CX ready (8x8, 60 Hz, continuous)");
 	return 0;
 }
 

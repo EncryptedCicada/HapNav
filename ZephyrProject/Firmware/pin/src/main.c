@@ -10,7 +10,7 @@
 
 LOG_MODULE_REGISTER(hapnav_pin, LOG_LEVEL_INF);
 
-#define SAMPLE_PERIOD_MS  50   /* 20 Hz; keep in sync with sensors.c */
+#define SAMPLE_PERIOD_MS  12   /* ~83 Hz (4× the previous 20 Hz cadence); keep in sync with sensors.c */
 
 /* Onboard LED acts as a hardware-level "I'm alive" indicator independent
  * of the USB-CDC console: a slow blink in steady-state means the sample
@@ -24,9 +24,9 @@ static void heartbeat_tick(uint32_t loop_count, bool ble_ready)
 	if (led.port == NULL || !device_is_ready(led.port)) {
 		return;
 	}
-	/* 20 Hz loop → toggle every 10 ticks = 1 Hz blink when BLE up,
-	 * every 4 ticks = 2.5 Hz when BLE down (visible "no link yet"). */
-	uint32_t period = ble_ready ? 10 : 4;
+	/* ~83 Hz loop → toggle every 40 ticks ≈ 1 Hz blink when BLE up,
+	 * every 16 ticks ≈ 2.5 Hz when BLE down (visible "no link yet"). */
+	uint32_t period = ble_ready ? 40 : 16;
 	if ((loop_count % period) == 0) {
 		gpio_pin_toggle_dt(&led);
 	}
@@ -50,7 +50,7 @@ int main(void)
 		return -EIO;
 	}
 
-	LOG_INF("HapNav pin: entering 20 Hz sample loop");
+	LOG_INF("HapNav pin: entering ~83 Hz sample loop");
 
 	struct hapnav_frame frame;
 	uint32_t loop_count = 0;

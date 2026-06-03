@@ -89,7 +89,22 @@ static void connected(struct bt_conn *conn, uint8_t err)
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	ARG_UNUSED(conn);
-	LOG_INF("Disconnected (reason 0x%02x)", reason);
+	LOG_INF("Disconnected (reason 0x%02x) — restarting advertising", reason);
+
+	/* The previous behaviour was to log and fall silent, which meant a pin
+	 * reset (or any other ungraceful drop) left the wristband sitting in
+	 * "not connected, not advertising" — the pin could never re-discover
+	 * it without a wristband power-cycle. Re-arming advertising here makes
+	 * the wristband immediately findable again. bt_le_adv_start with no
+	 * timeout option advertises indefinitely until the next connection,
+	 * so this satisfies the "stay findable for at least a few minutes"
+	 * requirement with margin. */
+	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1,
+				  ad, ARRAY_SIZE(ad),
+				  sd, ARRAY_SIZE(sd));
+	if (err) {
+		LOG_ERR("Re-advertising failed: %d", err);
+	}
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
