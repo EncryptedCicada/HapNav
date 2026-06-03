@@ -82,6 +82,28 @@ config HAPNAV_BENCH_MODE
 	  it should be obvious from a UART capture which mode a binary was
 	  built in.
 
+config HAPNAV_DEMO_MODE
+	bool "Pre-scripted demo mode (no real sensors needed)"
+	default n
+	help
+	  When enabled, pin_sensors_sample() replaces all real sensor reads
+	  with a looping sequence of scripted obstacle scenarios:
+	    1. Clear
+	    2. Obstacle approaching from center (2500 mm → 500 mm)
+	    3. Close center obstacle
+	    4. Left obstacle
+	    5. Right obstacle
+	    6. Wall (all columns)
+	    7. Clear
+
+	  The obstacle pipeline, BLE send, and UART trace all run normally
+	  so the wristband reacts and the visualizer displays correctly —
+	  no real sensors needed.
+
+	  Combine with CONFIG_HAPNAV_HEAD_TOF=n, CONFIG_HAPNAV_DOWN_TOF=n,
+	  CONFIG_HAPNAV_DROPOFF=n so missing sensor inits don't pollute the
+	  log with warnings.
+
 config HAPNAV_HABITUATION
 	bool "Fade alerts for obstacles stationary relative to the pin"
 	default y

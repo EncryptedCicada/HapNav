@@ -362,6 +362,115 @@ static inline float quat_pitch(const float q[4])
 	return asinf(sinp);
 }
 
+#if defined(CONFIG_HAPNAV_DEMO_MODE)
+
+/* ── Demo playback ──────────────────────────────────────────────────────── */
+
+#define DEMO_DIST_CLEAR    2500  /* mm — far, below urgency floor              */
+#define DEMO_DIST_CLOSE     500  /* mm — close, high urgency                   */
+#define DEMO_HEAD_TRIGGER   100  /* mm — within bench HEAD_PROXIMITY range     */
+#define DEMO_DOWN_BASELINE  300  /* mm — normal floor slant range              */
+#define DEMO_DOWN_DROPOFF  1500  /* mm — floor suddenly far → dropoff fires    */
+
+static const struct {
+	uint32_t   duration_ms;
+	const char *name;
+	int        col_lo;    /* first active column (0–7), -1 = all clear         */
+	int        col_hi;    /* last  active column (0–7)                          */
+	int16_t    dist_mm;   /* range for active columns (0 = interpolate 2500→500)*/
+	int16_t    head_mm;   /* head sensor range, -1 = no obstacle                */
+	int16_t    down_mm;   /* down sensor range, -1 = no reading                 */
+} demo_scenes[] = {
+	/*                                              head  down                 */
+	{ 2000, "clear",           -1, -1, DEMO_DIST_CLEAR,  -1, DEMO_DOWN_BASELINE },
+	{ 4000, "approach-center",  2,  5,               0,  -1, DEMO_DOWN_BASELINE },
+	{ 2000, "close-center",     2,  5, DEMO_DIST_CLOSE,  -1, DEMO_DOWN_BASELINE },
+	{ 2000, "left",             0,  1, DEMO_DIST_CLOSE,  -1, DEMO_DOWN_BASELINE },
+	{ 2000, "right",            6,  7, DEMO_DIST_CLOSE,  -1, DEMO_DOWN_BASELINE },
+	{ 2000, "head-obstacle",   -1, -1, DEMO_DIST_CLEAR,
+	  DEMO_HEAD_TRIGGER, -1 },
+	{ 2000, "dropoff",         -1, -1, DEMO_DIST_CLEAR,
+	  -1, DEMO_DOWN_DROPOFF },
+	{ 2000, "clear-end",       -1, -1, DEMO_DIST_CLEAR,  -1, -1 },
+};
+
+static void demo_fill_frame(struct hapnav_frame *out)
+{
+	static uint32_t start_ms;
+	static bool     started;
+	static uint8_t  last_scene = 0xFF;
+
+	if (!started) {
+		start_ms = k_uptime_get_32();
+		started  = true;
+	}
+
+	/* Compute total loop length */
+	uint32_t total_ms = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(demo_scenes); i++) {
+		total_ms += demo_scenes[i].duration_ms;
+	}
+
+	uint32_t elapsed = (k_uptime_get_32() - start_ms) % total_ms;
+
+	/* Find current scene and time within it */
+	uint8_t  scene = 0;
+	uint32_t scene_start = 0;
+	for (uint8_t i = 0; i < ARRAY_SIZE(demo_scenes); i++) {
+		if (elapsed < scene_start + demo_scenes[i].duration_ms) {
+			scene = i;
+			break;
+		}
+		scene_start += demo_scenes[i].duration_ms;
+	}
+	uint32_t t_in = elapsed - scene_start;
+
+	if (scene != last_scene) {
+		LOG_INF("DEMO scene %u/%u: %s",
+			(unsigned)(scene + 1),
+			(unsigned)ARRAY_SIZE(demo_scenes),
+			demo_scenes[scene].name);
+		last_scene = scene;
+	}
+
+	/* Identity quaternion — pipeline treats sensor as level, no tilt */
+	out->quat[0] = 1.0f;
+	out->quat[1] = 0.0f;
+	out->quat[2] = 0.0f;
+	out->quat[3] = 0.0f;
+
+	head_distance_mm = demo_scenes[scene].head_mm;
+	down_distance_mm = demo_scenes[scene].down_mm;
+
+	/* Active range for this scene */
+	int16_t active_dist;
+	if (demo_scenes[scene].dist_mm == 0) {
+		/* Approach: linear 2500 → 500 mm */
+		active_dist = (int16_t)(DEMO_DIST_CLEAR -
+			((int32_t)(DEMO_DIST_CLEAR - DEMO_DIST_CLOSE) *
+			 (int32_t)t_in /
+			 (int32_t)demo_scenes[scene].duration_ms));
+	} else {
+		active_dist = demo_scenes[scene].dist_mm;
+	}
+
+	int col_lo = demo_scenes[scene].col_lo;
+	int col_hi = demo_scenes[scene].col_hi;
+
+	for (int row = 0; row < 8; row++) {
+		for (int col = 0; col < 8; col++) {
+			int z = row * 8 + col;
+			bool active = (col_lo >= 0) &&
+				      (col >= col_lo) && (col <= col_hi);
+			out->distances_mm[z]  = active ? active_dist
+						       : DEMO_DIST_CLEAR;
+			out->target_status[z] = 5; /* valid */
+		}
+	}
+}
+
+#endif /* CONFIG_HAPNAV_DEMO_MODE */
+
 static void obs_flags_str(uint8_t flags, char *buf, size_t len)
 {
 	if (!flags) {
@@ -392,15 +501,18 @@ int pin_sensors_sample(struct hapnav_frame *out)
 	memset(out, 0, sizeof(*out));
 	out->timestamp_ms = k_uptime_get_32();
 
-	/* ── BNO055 motion (quat + accel + gyro in one UART burst) ──────── */
 	float accel_g[3]    = {0};
 	float gyro_radps[3] = {0};
+
+#if defined(CONFIG_HAPNAV_DEMO_MODE)
+	demo_fill_frame(out);
+#else
+	/* ── BNO055 motion (quat + accel + gyro in one UART burst) ──────── */
 	if (bno055_ok) {
 		int err = hapnav_bno055_read_motion(&bno055, out->quat,
 						    accel_g, gyro_radps);
 		if (err) {
 			LOG_WRN("BNO055 read failed: %d", err);
-			/* identity quat so the rest of the pipeline doesn't NaN */
 			out->quat[0] = 1.0f;
 		}
 	} else {
@@ -434,6 +546,7 @@ int pin_sensors_sample(struct hapnav_frame *out)
 	/* ── Head + down ToFs ──────────────────────────────────────────── */
 	update_head_distance();
 	update_down_distance();
+#endif /* CONFIG_HAPNAV_DEMO_MODE */
 
 	/* ── Obstacle pipeline ─────────────────────────────────────────── */
 	hapnav_obstacle_step(out->distances_mm, out->target_status,
