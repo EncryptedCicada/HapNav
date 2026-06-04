@@ -58,6 +58,18 @@ FLAG_NAMES = [
 ]
 
 
+def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Hamilton-convention WXYZ quaternion product, a ⊗ b."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return np.array([
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ], dtype=np.float32)
+
+
 @dataclass
 class MappingState:
     """World-space accumulation for the front 8×8 grid only."""
@@ -221,14 +233,22 @@ class HapNavViewer:
     # ── per-frame ───────────────────────────────────────────────────────
 
     def _apply_pin_rotation(self, quaternion: np.ndarray, imu_connected: bool):
-        """Set /pin's wxyz to the BNO055 quaternion.
+        """Set /pin's wxyz to the BNO055 quaternion, after applying the
+        configurable world-frame correction (`IMU_QUAT_CORRECTION_WXYZ`).
 
-        The BNO055 axis remap is already applied in firmware (CONFIG=0x18,
-        SIGN=0x01), so what we receive is body→world directly — no extra
-        correction needed here.
+        The firmware's axis remap aligns the BNO055 output with our pin
+        body frame, but the BNO055's gravity+magnetic-north world frame may
+        still differ from the viewer's world frame by a fixed rotation —
+        that's what the correction quat compensates for. Defaults to
+        identity; tune in `config.py` if the rendered pin doesn't track its
+        physical orientation.
         """
         if self.apply_imu.value and imu_connected:
-            self.scene.pin.wxyz = tuple(float(x) for x in quaternion)
+            corrected = _quat_multiply(
+                np.asarray(config.IMU_QUAT_CORRECTION_WXYZ, dtype=np.float32),
+                quaternion,
+            )
+            self.scene.pin.wxyz = tuple(float(x) for x in corrected)
         else:
             self.scene.pin.wxyz = (1.0, 0.0, 0.0, 0.0)
 

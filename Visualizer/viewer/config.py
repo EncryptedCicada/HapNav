@@ -171,14 +171,41 @@ TOFS: tuple[ToFMount, ...] = (TOF_FRONT, TOF_HEAD, TOF_DOWN)
 # `sensor_offset` is zero here because the BNO055+BMP280 BFF asset is laid
 # out so the board centre coincides with the chip's observation origin —
 # nothing to compensate for.
+#
+# `pin_orientation_wxyz` = R_x(90°). The trimesh box has its long dimension
+# along local +Y and its chip-atlas top face on local +Z; rotating +90°
+# around X puts the long axis vertical (pin +Z) and the chip face forward
+# (pin -Y), which is how the BFF actually sits inside the pin enclosure.
 IMU = IMUMount(
     name="BNO055",
     pin_position=(0.0, 0.005, 0.000),
-    pin_orientation_wxyz=(1.0, 0.0, 0.0, 0.0),
+    pin_orientation_wxyz=(0.70710678, 0.70710678, 0.0, 0.0),
     sensor_offset=(0.0, 0.0, 0.0),
     dimensions=(0.015, 0.026, 0.001),
     texture="bno055+bmp280-atlas.png",
 )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Post-correction between the BNO055's world frame and the viewer's world
+# frame. The chip's NDOF fusion outputs an orientation relative to its own
+# gravity-up + magnetic-north reference; depending on how the chip is
+# mounted and the firmware's axis remap, that frame may differ from the
+# viewer's world frame by a rotation. The viewer multiplies the incoming
+# BNO055 quaternion by this correction before driving `/pin.wxyz`, so the
+# rendered pin tracks the physical pin instead of appearing flipped.
+#
+# Default is identity. Common starting points if the pin renders wrong:
+#   * 180° around X     → (0.0, 1.0, 0.0, 0.0)   — fixes "upside down" flips
+#   * 180° around Y     → (0.0, 0.0, 1.0, 0.0)   — fixes "facing wrong way" yaw
+#   * 180° around Z     → (0.0, 0.0, 0.0, 1.0)   — fixes magnetic-north yaw flip
+#   *  90° around Z CCW → (0.70710678, 0.0, 0.0, 0.70710678)
+#
+# The viewer also has an "Apply IMU Rotation" GUI toggle — flip it off to
+# confirm the *static* config (board mounts, mesh orientations) is right
+# before tuning this correction.
+# ────────────────────────────────────────────────────────────────────────────
+IMU_QUAT_CORRECTION_WXYZ: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
 
 # ────────────────────────────────────────────────────────────────────────────
