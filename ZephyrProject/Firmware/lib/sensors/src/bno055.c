@@ -18,6 +18,8 @@ LOG_MODULE_REGISTER(hapnav_bno055, LOG_LEVEL_INF);
 #define REG_CALIB_STAT         0x35
 #define REG_UNIT_SEL           0x3B
 #define REG_OPR_MODE           0x3D
+#define REG_POWER_MODE         0x3E
+#define REG_SYS_TRIGGER        0x3F
 #define REG_AXIS_REMAP_CONFIG  0x41
 #define REG_AXIS_REMAP_SIGN    0x42
 
@@ -25,6 +27,13 @@ LOG_MODULE_REGISTER(hapnav_bno055, LOG_LEVEL_INF);
 
 #define OPR_MODE_CONFIG        0x00
 #define OPR_MODE_NDOF          0x0C
+
+#define POWER_MODE_NORMAL      0x00
+
+#define SYS_TRIGGER_INTERNAL_CLK 0x00  /* CLK_SEL bit 7 = 0, no triggers */
+#define SYS_TRIGGER_RST_SYS      0x20  /* bit 5: trigger full system reset */
+
+#define POR_DELAY_MS           700     /* datasheet: ~650 ms after POR */
 
 /* Quaternion is fixed-point Q14: integer / 16384 = unit value. */
 #define QUAT_LSB_PER_UNIT      16384.0f
@@ -71,12 +80,48 @@ int hapnav_bno055_init(struct hapnav_bno055 *b,
 		return -ENODEV;
 	}
 
-	/* Enter CONFIG (default after reset, but be explicit), select page 0,
-	 * pin units to default (m/s², dps, deg). */
-	(void)i2c_reg_write_byte(i2c_bus, addr, REG_OPR_MODE,
-				 OPR_MODE_CONFIG);
+	/* Linux-style configure sequence (bno055.c:355-387): always force
+	 * CONFIG mode, set the clock source explicitly, then power mode, then
+	 * units. POR defaults *should* leave everything correct but a warm
+	 * boot with the chip still powered can land in odd states; being
+	 * explicit costs us four extra writes and ~25 ms. */
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_OPR_MODE, OPR_MODE_CONFIG);
 	k_msleep(MODE_CHANGE_DELAY_MS);
-	(void)i2c_reg_write_byte(i2c_bus, addr, REG_PAGE_ID,  0x00);
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_PAGE_ID, 0x00);
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_POWER_MODE, POWER_MODE_NORMAL);
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_SYS_TRIGGER,
+				 SYS_TRIGGER_INTERNAL_CLK);
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_UNIT_SEL, 0x00);
+
+	/* Before entering any fusion mode, do a full system reset and rebuild
+	 * the configuration. This mirrors what the Linux driver does in
+	 * bno055_operation_mode_set() (bno055.c:401-415): the fusion
+	 * algorithm holds internal state that survives an OPR_MODE write, so
+	 * to guarantee a clean start we have to bounce the chip. */
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_SYS_TRIGGER,
+				 SYS_TRIGGER_RST_SYS);
+	k_msleep(POR_DELAY_MS);
+
+	/* Re-probe after reset (registers cleared, chip back at defaults). */
+	for (int retry = 0; retry < 10; retry++) {
+		rc = i2c_reg_read_byte(i2c_bus, addr, REG_CHIP_ID, &id);
+		if (rc == 0 && id == CHIP_ID_BNO055) {
+			break;
+		}
+		k_msleep(50);
+	}
+	if (rc || id != CHIP_ID_BNO055) {
+		LOG_ERR("BNO055 lost after soft reset (id=0x%02x rc=%d)",
+			id, rc);
+		return -ENODEV;
+	}
+
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_OPR_MODE, OPR_MODE_CONFIG);
+	k_msleep(MODE_CHANGE_DELAY_MS);
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_PAGE_ID, 0x00);
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_POWER_MODE, POWER_MODE_NORMAL);
+	(void)i2c_reg_write_byte(i2c_bus, addr, REG_SYS_TRIGGER,
+				 SYS_TRIGGER_INTERNAL_CLK);
 	(void)i2c_reg_write_byte(i2c_bus, addr, REG_UNIT_SEL, 0x00);
 
 	rc = i2c_reg_write_byte(i2c_bus, addr, REG_OPR_MODE, OPR_MODE_NDOF);

@@ -97,6 +97,28 @@ LOG_MODULE_REGISTER(hapnav_obstacle, LOG_LEVEL_INF);
 #define HABIT_FLOOR         0.0f
 #endif
 
+/* ── Per-bin temporal smoothing ──────────────────────────────────────────────
+ * The raw `bin_nearest_mm` produced by the cluster stage flickers between -1
+ * and real values frame-to-frame when per-pixel status codes (5 vs 255 etc.)
+ * oscillate on marginal returns — which they do constantly at bench-mode
+ * range. Without smoothing, that flicker propagates to the closing-rate stage
+ * as huge spurious Δr/Δt spikes, to TTC as a saturated `ttc_score`, and to
+ * the habituation gate as a "new obstacle" reset, producing wildly oscillating
+ * urgency on a static scene.
+ *
+ * Each bin therefore runs a small confidence + EMA filter:
+ *   * BIN_HITS_REQUIRED consecutive frames of raw detection are needed before
+ *     the bin reports an obstacle ("confirmation").
+ *   * Once confirmed, the reported range is an EMA of the raw cluster output,
+ *     so a single-frame outlier moves the value by ~BIN_EMA_NUM/BIN_EMA_DEN.
+ *   * Lost-detection frames decrement the hit counter; the smoothed value is
+ *     held in the meantime, giving up to (BIN_HITS_MAX - BIN_HITS_REQUIRED + 1)
+ *     frames of coast-down before the bin reports "no obstacle". */
+#define BIN_HITS_REQUIRED   3
+#define BIN_HITS_MAX        8
+#define BIN_EMA_NUM         3
+#define BIN_EMA_DEN        10
+
 /* ── State ────────────────────────────────────────────────────────────────── */
 
 static float   g_ray_B[HAPNAV_TOF_ZONES][3];   /* unit rays in body frame, tilt baked in */
@@ -109,6 +131,12 @@ static int   g_accel_hist_count;
 static int16_t g_prev_nearest_mm[4];
 static bool    g_prev_valid[4];
 static bool    g_mostly_invalid;   /* latched, hysteretic (see thresholds) */
+
+/* Per-bin temporal-smoothing filter state. See BIN_HITS_* / BIN_EMA_* above. */
+static struct {
+	float   smooth_mm;
+	uint8_t hits;
+} g_bin_filter[4];
 
 #if defined(CONFIG_HAPNAV_HABITUATION)
 static float   g_habit[4];         /* per-bin urgency scale, decays when still */
@@ -216,6 +244,7 @@ void hapnav_obstacle_init(void)
 	memset(g_prev_nearest_mm, 0, sizeof(g_prev_nearest_mm));
 	memset(g_prev_valid,      0, sizeof(g_prev_valid));
 	g_mostly_invalid = false;
+	memset(g_bin_filter, 0, sizeof(g_bin_filter));
 
 #if defined(CONFIG_HAPNAV_HABITUATION)
 	for (int b = 0; b < 4; b++) {
@@ -379,21 +408,56 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 		}
 	}
 
-	/* ── 6. Closing rate per bin (frame-to-frame) ─────────────────────── */
+	/* ── 5b. Temporal smoothing of `bin_nearest_mm` ─────────────────────
+	 * Apply per-bin confidence hysteresis + EMA before the closing-rate,
+	 * urgency, and habituation stages consume the value, so per-pixel
+	 * status flicker in the cluster output stops propagating downstream.
+	 * `effective_nearest_mm` replaces `bin_nearest_mm` from here on. */
+	int16_t effective_nearest_mm[4];
+	for (int b = 0; b < 4; b++) {
+		if (bin_nearest_mm[b] >= 0) {
+			if (g_bin_filter[b].hits == 0) {
+				/* First hit since coast-down — snap, don't smear. */
+				g_bin_filter[b].smooth_mm = (float)bin_nearest_mm[b];
+			} else {
+				g_bin_filter[b].smooth_mm =
+					(g_bin_filter[b].smooth_mm *
+					     (BIN_EMA_DEN - BIN_EMA_NUM) +
+					 (float)bin_nearest_mm[b] * BIN_EMA_NUM) /
+					BIN_EMA_DEN;
+			}
+			if (g_bin_filter[b].hits < BIN_HITS_MAX) {
+				g_bin_filter[b].hits++;
+			}
+		} else {
+			if (g_bin_filter[b].hits > 0) {
+				g_bin_filter[b].hits--;
+			}
+			/* smooth_mm held during coast-down. */
+		}
+
+		effective_nearest_mm[b] =
+			(g_bin_filter[b].hits >= BIN_HITS_REQUIRED)
+				? (int16_t)g_bin_filter[b].smooth_mm
+				: -1;
+	}
+
+	/* ── 6. Closing rate per bin (frame-to-frame), on smoothed values ──── */
 
 	float closing_mps[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	if (!yaw_slewing && dt_s > 0.001f) {
 		for (int b = 0; b < 4; b++) {
-			if (bin_nearest_mm[b] >= 0 && g_prev_valid[b]) {
-				float dr_m = (g_prev_nearest_mm[b] - bin_nearest_mm[b]) * 0.001f;
+			if (effective_nearest_mm[b] >= 0 && g_prev_valid[b]) {
+				float dr_m = (g_prev_nearest_mm[b] -
+					      effective_nearest_mm[b]) * 0.001f;
 				closing_mps[b] = dr_m / dt_s;
 			}
 		}
 	}
 
 	for (int b = 0; b < 4; b++) {
-		if (bin_nearest_mm[b] >= 0) {
-			g_prev_nearest_mm[b] = bin_nearest_mm[b];
+		if (effective_nearest_mm[b] >= 0) {
+			g_prev_nearest_mm[b] = effective_nearest_mm[b];
 			g_prev_valid[b]      = true;
 		} else {
 			g_prev_valid[b] = false;
@@ -406,7 +470,7 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 	const float r_max = MAX_RANGE_MM * 0.001f;
 
 	for (int b = 0; b < 4; b++) {
-		if (bin_nearest_mm[b] < 0) {
+		if (effective_nearest_mm[b] < 0) {
 			out->urgency[b] = 0;
 #if defined(CONFIG_HAPNAV_HABITUATION)
 			/* Bin cleared — re-arm so the next obstacle alerts fully. */
@@ -415,7 +479,7 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 #endif
 			continue;
 		}
-		float r_m = bin_nearest_mm[b] * 0.001f;
+		float r_m = effective_nearest_mm[b] * 0.001f;
 
 		float prox = clamp01((r_max - r_m) / (r_max - r_min));
 
@@ -430,7 +494,7 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 		if (stationary)  urg *= 0.5f;
 		if (yaw_slewing) urg *= 0.5f;
 #if defined(CONFIG_HAPNAV_HABITUATION)
-		urg *= update_habituation(b, bin_nearest_mm[b]);
+		urg *= update_habituation(b, effective_nearest_mm[b]);
 #endif
 		out->urgency[b] = to_u8(urg);
 	}
@@ -439,12 +503,12 @@ void hapnav_obstacle_step(const int16_t distances_mm[HAPNAV_TOF_ZONES],
 		out->urgency[0] = out->urgency[1] = out->urgency[2] = out->urgency[3] = 0;
 	}
 
-	/* In-path nearest = min over the two centre bins. */
+	/* In-path nearest = min over the two centre bins (smoothed value). */
 	int16_t nearest = -1;
 	for (int b = 1; b <= 2; b++) {
-		if (bin_nearest_mm[b] >= 0 &&
-		    (nearest < 0 || bin_nearest_mm[b] < nearest)) {
-			nearest = bin_nearest_mm[b];
+		if (effective_nearest_mm[b] >= 0 &&
+		    (nearest < 0 || effective_nearest_mm[b] < nearest)) {
+			nearest = effective_nearest_mm[b];
 		}
 	}
 	out->nearest_range_mm = nearest;

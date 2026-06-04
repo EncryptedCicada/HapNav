@@ -455,7 +455,7 @@ int pin_sensors_sample(struct hapnav_frame *out)
 	/* ── Trace ──────────────────────────────────────────────────────── */
 	{
 		static uint32_t trace_div;
-		bool dump_grid = (trace_div++ % 20) == 0;   /* 1 Hz at 20 Hz */
+		bool dump_grid = (trace_div++ % 1) == 0;   /* Per Frame */
 		const struct hapnav_obstacles *o = &out->obstacles;
 
 		printk("PIN {\"ts\":%u,"
