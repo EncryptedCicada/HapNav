@@ -35,6 +35,13 @@ LOG_MODULE_REGISTER(pin_sensors, LOG_LEVEL_INF);
 #define SAMPLE_PERIOD_MS  12            /* ~83 Hz (4× the previous 20 Hz cadence) */
 #define SAMPLE_DT_S       (SAMPLE_PERIOD_MS / 1000.0f)
 
+/* How often each of head + down VL53L1X actually gets sampled, in loop
+ * counts. Head and down are 180° out of phase, so at the steady-state
+ * effective ~50 Hz loop rate this puts each VL53L1X at ~6 Hz — well above
+ * what slow-changing head-clearance / dropoff needs. Lower this for
+ * snappier VL53L1X latency at the cost of lower main-loop rate. */
+#define VL53L1X_SAMPLE_PERIOD_LOOPS  8
+
 /* Head-clearance trigger envelope. Worn-pose default catches doorframes at
  * 1.0–2.5 m forward; bench mode shrinks it to a 15 cm slant. */
 #if defined(CONFIG_HAPNAV_BENCH_MODE)
@@ -407,8 +414,25 @@ int pin_sensors_sample(struct hapnav_frame *out)
 	}
 
 	/* ── Head + down ToFs ──────────────────────────────────────────── */
-	update_head_distance();
-	update_down_distance();
+	/* ── Head + down VL53L1X — skip-framed ─────────────────────────────
+	 * The Zephyr in-tree VL53L1X driver's `sensor_channel_get` blocks on
+	 * `VL53L1_WaitMeasurementDataReady`, which sits for the chip's full
+	 * timing-budget window (~33 ms in LONG mode). Doing both reads every
+	 * loop pins the sample rate to ~12 Hz floor. Sampling each one every
+	 * VL53L1X_SAMPLE_PERIOD_LOOPS iterations, staggered, lets the main
+	 * loop ride near its k_msleep target while the heads still update
+	 * fast enough for slow-changing head-clearance and dropoff signals
+	 * (each ~7-10 Hz at a 50-60 Hz loop). The intervening loops just
+	 * reuse the last-cached `head_distance_mm` / `down_distance_mm`. */
+	static uint32_t vl53l1x_phase;
+	if ((vl53l1x_phase % VL53L1X_SAMPLE_PERIOD_LOOPS) == 0) {
+		update_head_distance();
+	}
+	if ((vl53l1x_phase % VL53L1X_SAMPLE_PERIOD_LOOPS) ==
+	    VL53L1X_SAMPLE_PERIOD_LOOPS / 2) {
+		update_down_distance();
+	}
+	vl53l1x_phase++;
 
 	/* ── Obstacle pipeline ─────────────────────────────────────────── */
 	hapnav_obstacle_step(out->distances_mm, out->target_status,
