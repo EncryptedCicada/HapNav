@@ -1,6 +1,34 @@
-"""Viser scene setup for VL53L5CX viewer."""
+"""Viser scene construction for the HapNav pin visualizer.
 
-from dataclasses import dataclass
+Scene hierarchy:
+
+  /world                         world origin + reference grid
+  /pin                           pin body frame  (wxyz follows BNO055)
+    /pin/imu                     BNO055 cosmetic breakout
+      /pin/imu/mesh
+      /pin/imu/sensor            chip-aperture sub-frame
+    /pin/tof_front               VL53L5CX 8×8 mount on pin face
+      /pin/tof_front/mesh
+      /pin/tof_front/sensor
+        /pin/tof_front/sensor/rays/ray_N
+        /pin/tof_front/sensor/points
+    /pin/tof_head                VL53L1X single-zone +20° up
+      /pin/tof_head/mesh
+      /pin/tof_head/sensor
+        /pin/tof_head/sensor/ray
+        /pin/tof_head/sensor/point
+    /pin/tof_down                VL53L1X single-zone 45° down
+      /pin/tof_down/mesh
+      /pin/tof_down/sensor
+        /pin/tof_down/sensor/ray
+        /pin/tof_down/sensor/point
+
+Everything below /pin moves with the IMU rotation — the front grid's point
+cloud, head/down hit points, and all rays are children of their respective
+sensor frames, so they pick up parent transforms for free.
+"""
+
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -9,200 +37,114 @@ import trimesh
 import viser
 
 from . import config
-from .config import BoardConfig
-from .geometry import CoordinateMethod, ZoneAngles
+from .config import IMUMount, SensorKind, ToFMount
+from .geometry import ZoneAngles
 
 
-def _yaw_to_wxyz(yaw_deg: float) -> tuple[float, float, float, float]:
-    """Convert a yaw angle (rotation around Z) to wxyz quaternion."""
-    yaw_rad = np.deg2rad(yaw_deg)
-    w = np.cos(yaw_rad / 2)
-    z = np.sin(yaw_rad / 2)
-    return (float(w), 0.0, 0.0, float(z))
+@dataclass
+class ToFHandles:
+    """Per-ToF scene handles."""
+
+    mount: ToFMount
+    board: viser.FrameHandle
+    mesh: viser.MeshHandle
+    sensor: viser.FrameHandle
+    rays: list = field(default_factory=list)  # one ray for SINGLE_ZONE, 64 for GRID_8X8
+    point_path: str = ""                       # set on creation; updated by viewer
 
 
 @dataclass
 class SceneHandles:
-    """Handles to the scene hierarchy.
+    """Top-level scene handles."""
 
-    Hierarchy:
-        /breadboard                     # Breadboard frame (world origin)
-            /breadboard/imu             # IMU board frame
-                /breadboard/imu/mesh    # Board mesh
-                /breadboard/imu/sensor  # Sensor origin frame
-            /breadboard/tof             # ToF board frame
-                /breadboard/tof/mesh    # Board mesh
-                /breadboard/tof/sensor  # Sensor origin frame (with yaw)
-                    /breadboard/tof/sensor/rays/ray_N  # Zone rays
-                    /breadboard/tof/sensor/points      # Point cloud
-                    /breadboard/tof/sensor/plane       # Fitted plane
-    """
-
-    breadboard: viser.FrameHandle
+    pin: viser.FrameHandle
     imu_board: viser.FrameHandle
     imu_mesh: viser.MeshHandle
     imu_sensor: viser.FrameHandle
-    tof_board: viser.FrameHandle
-    tof_mesh: viser.MeshHandle
-    tof_sensor: viser.FrameHandle
-    zone_rays: list
+    tofs: list[ToFHandles]
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# Reference grid (floor plane).
+# ────────────────────────────────────────────────────────────────────────────
 
 def create_grid(server: viser.ViserServer, size: float = 2.0) -> list:
-    """Create a reference grid on the XY plane."""
-    grid_handles = []
+    handles = []
     for i in range(-10, 11):
-        start_x = [-size, i * 0.2, 0]
-        end_x = [size, i * 0.2, 0]
-        handle_x = server.scene.add_spline_catmull_rom(
-            f"/grid/line_x_{i}",
-            positions=np.array([start_x, end_x]),
+        x_line = server.scene.add_spline_catmull_rom(
+            f"/world/grid/line_x_{i}",
+            positions=np.array([[-size, i * 0.2, 0], [size, i * 0.2, 0]]),
             color=(160, 160, 160),
             line_width=1.0,
         )
-        grid_handles.append(handle_x)
-
-        start_y = [i * 0.2, -size, 0]
-        end_y = [i * 0.2, size, 0]
-        handle_y = server.scene.add_spline_catmull_rom(
-            f"/grid/line_y_{i}",
-            positions=np.array([start_y, end_y]),
+        y_line = server.scene.add_spline_catmull_rom(
+            f"/world/grid/line_y_{i}",
+            positions=np.array([[i * 0.2, -size, 0], [i * 0.2, size, 0]]),
             color=(160, 160, 160),
             line_width=1.0,
         )
-        grid_handles.append(handle_y)
+        handles += [x_line, y_line]
+    return handles
 
-    return grid_handles
 
+# ────────────────────────────────────────────────────────────────────────────
+# Board mesh helper — shared between IMU + all ToFs.
+# ────────────────────────────────────────────────────────────────────────────
 
-def _create_board_mesh(
+def _board_mesh(
     server: viser.ViserServer,
     scene_path: str,
-    board_config: BoardConfig,
+    dimensions: tuple[float, float, float],
+    texture_name: str,
+    is_atlas: bool,
+    fallback_color: tuple[int, int, int, int],
     assets_dir: Path,
-):
-    """Create a board mesh at the origin of its parent frame."""
-    width, length, height = board_config.dimensions
-    board_mesh = trimesh.creation.box(extents=[width, length, height])
+) -> viser.MeshHandle:
+    width, length, height = dimensions
+    mesh = trimesh.creation.box(extents=[width, length, height])
 
-    texture_path = assets_dir / board_config.texture
+    texture_path = assets_dir / texture_name
     if texture_path.exists():
         texture_image = Image.open(texture_path)
-        uv = np.zeros((len(board_mesh.vertices), 2))
-        for i, v in enumerate(board_mesh.vertices):
+        uv = np.zeros((len(mesh.vertices), 2))
+        for i, v in enumerate(mesh.vertices):
             u = (v[0] + width / 2) / width
             v_coord = (v[1] + length / 2) / length
-
-            if board_config.is_atlas:
+            if is_atlas:
+                # Vertical atlas: top half on top face, bottom half on bottom.
                 if v[2] > 0:
                     v_coord = 0.5 + v_coord * 0.5
                 else:
                     v_coord = v_coord * 0.5
-
             uv[i, 0] = u
             uv[i, 1] = v_coord
-
-        material = trimesh.visual.material.PBRMaterial(
-            baseColorTexture=texture_image,
-            metallicFactor=0.0,
-            roughnessFactor=1.0,
+        mesh.visual = trimesh.visual.TextureVisuals(
+            uv=uv,
+            material=trimesh.visual.material.PBRMaterial(
+                baseColorTexture=texture_image,
+                metallicFactor=0.0,
+                roughnessFactor=1.0,
+            ),
         )
-        board_mesh.visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
     else:
-        board_mesh.visual.face_colors = board_config.fallback_color
+        mesh.visual.face_colors = fallback_color
 
-    return server.scene.add_mesh_trimesh(scene_path, mesh=board_mesh)
+    return server.scene.add_mesh_trimesh(scene_path, mesh=mesh)
 
 
-def create_scene_hierarchy(
+# ────────────────────────────────────────────────────────────────────────────
+# Front grid: 64 zone rays in sensor-local coordinates.
+# ────────────────────────────────────────────────────────────────────────────
+
+def _create_grid_rays(
     server: viser.ViserServer,
-    assets_dir: Path,
-    zone_angles: ZoneAngles,
-) -> SceneHandles:
-    """Create the complete scene hierarchy.
-
-    The hierarchy flows: breadboard -> board -> sensor
-    Points and rays are children of the sensor frame, so they automatically
-    inherit the sensor's world transform.
-    """
-    # Breadboard frame at world origin
-    breadboard = server.scene.add_frame("/breadboard", show_axes=False)
-
-    # IMU board frame (positioned at board center in world)
-    # Board center = world_position - sensor_offset (sensor is at world_position)
-    imu_board_pos = tuple(
-        np.array(config.IMU_BOARD.world_position) - np.array(config.IMU_BOARD.sensor_offset)
-    )
-    imu_board = server.scene.add_frame(
-        "/breadboard/imu",
-        show_axes=False,
-        position=imu_board_pos,
-    )
-    imu_mesh = _create_board_mesh(
-        server,
-        scene_path="/breadboard/imu/mesh",
-        board_config=config.IMU_BOARD,
-        assets_dir=assets_dir,
-    )
-    # IMU sensor frame (at sensor_offset from board center)
-    imu_sensor = server.scene.add_frame(
-        "/breadboard/imu/sensor",
-        show_axes=True,
-        axes_length=0.01,
-        axes_radius=0.001,
-        position=config.IMU_BOARD.sensor_offset,
-        wxyz=_yaw_to_wxyz(config.IMU_BOARD.sensor_yaw_deg),
-    )
-
-    # ToF board frame (positioned at board center in world)
-    tof_board_pos = tuple(
-        np.array(config.TOF_BOARD.world_position) - np.array(config.TOF_BOARD.sensor_offset)
-    )
-    tof_board = server.scene.add_frame(
-        "/breadboard/tof",
-        show_axes=False,
-        position=tof_board_pos,
-    )
-    tof_mesh = _create_board_mesh(
-        server,
-        scene_path="/breadboard/tof/mesh",
-        board_config=config.TOF_BOARD,
-        assets_dir=assets_dir,
-    )
-    # ToF sensor frame (at sensor_offset from board center, with yaw correction)
-    tof_sensor = server.scene.add_frame(
-        "/breadboard/tof/sensor",
-        show_axes=True,
-        axes_length=0.01,
-        axes_radius=0.001,
-        position=config.TOF_BOARD.sensor_offset,
-        wxyz=_yaw_to_wxyz(config.TOF_BOARD.sensor_yaw_deg),
-    )
-
-    # Zone rays as children of ToF sensor (in sensor-local coordinates)
-    zone_rays = _create_zone_rays(server, zone_angles)
-
-    return SceneHandles(
-        breadboard=breadboard,
-        imu_board=imu_board,
-        imu_mesh=imu_mesh,
-        imu_sensor=imu_sensor,
-        tof_board=tof_board,
-        tof_mesh=tof_mesh,
-        tof_sensor=tof_sensor,
-        zone_rays=zone_rays,
-    )
-
-
-def _create_zone_rays(
-    server: viser.ViserServer,
+    parent_path: str,
     zone_angles: ZoneAngles,
 ) -> list:
-    """Create zone ray visualization in sensor-local coordinates."""
-    min_z = config.MIN_RANGE_MM / 1000
-    max_z = config.MAX_RANGE_MM / 1000
+    min_z = config.MIN_RANGE_MM / 1000.0
+    max_z = config.MAX_RANGE_MM / 1000.0
 
-    zone_rays = []
+    rays = []
     for i in range(config.NUM_ZONES):
         start = [
             min_z * zone_angles.tan_x[i],
@@ -214,81 +156,251 @@ def _create_zone_rays(
             max_z * zone_angles.tan_y[i],
             max_z,
         ]
-        ray = server.scene.add_spline_catmull_rom(
-            f"/breadboard/tof/sensor/rays/ray_{i}",
+        rays.append(server.scene.add_spline_catmull_rom(
+            f"{parent_path}/rays/ray_{i}",
             positions=np.array([start, end], dtype=np.float32),
             color=(100, 150, 255),
             line_width=1.0,
-        )
-        zone_rays.append(ray)
-
-    return zone_rays
+        ))
+    return rays
 
 
-def update_zone_rays(
+# ────────────────────────────────────────────────────────────────────────────
+# Single-zone ToF: one ray along +Z_sensor (optical axis).
+# ────────────────────────────────────────────────────────────────────────────
+
+def _create_single_zone_ray(
     server: viser.ViserServer,
-    zone_angles: ZoneAngles,
-    method: CoordinateMethod,
-    visible: bool = True,
-    distances: np.ndarray | None = None,
+    parent_path: str,
+    color: tuple[int, int, int],
 ) -> list:
-    """Update zone ray positions based on coordinate method.
+    min_z = config.SINGLE_ZONE_MIN_MM / 1000.0
+    max_z = config.SINGLE_ZONE_MAX_MM / 1000.0
+    ray = server.scene.add_spline_catmull_rom(
+        f"{parent_path}/ray",
+        positions=np.array([[0, 0, min_z], [0, 0, max_z]], dtype=np.float32),
+        color=color,
+        line_width=2.0,
+    )
+    return [ray]
 
-    Args:
-        server: Viser server instance.
-        zone_angles: Pre-computed zone angle data.
-        method: Coordinate transform method.
-        visible: Whether rays should be visible.
-        distances: Optional per-zone distances in mm. If provided, rays are clipped
-            to the measured distance instead of MAX_RANGE_MM.
 
-    Returns the new ray handles (the old ones become stale).
-    """
-    min_range = config.MIN_RANGE_MM / 1000
-    max_range = config.MAX_RANGE_MM / 1000
+# ────────────────────────────────────────────────────────────────────────────
+# Top-level hierarchy.
+# ────────────────────────────────────────────────────────────────────────────
+
+def create_scene_hierarchy(
+    server: viser.ViserServer,
+    assets_dir: Path,
+    zone_angles: ZoneAngles,
+) -> SceneHandles:
+    # World root + reference grid live under /world (camera anchor is /world/origin).
+    server.scene.add_frame("/world", show_axes=False)
+    server.scene.add_frame("/world/origin", axes_length=0.02, axes_radius=0.001)
+
+    # Pin body frame — anchored at PIN_WORLD_POSITION, rotated by IMU.
+    pin = server.scene.add_frame(
+        "/pin",
+        show_axes=True,
+        axes_length=0.03,
+        axes_radius=0.0015,
+        position=config.PIN_WORLD_POSITION,
+        wxyz=(1.0, 0.0, 0.0, 0.0),
+    )
+
+    # IMU breakout.
+    imu_board = server.scene.add_frame(
+        "/pin/imu",
+        show_axes=False,
+        position=tuple(np.array(config.IMU.pin_position) - np.array(config.IMU.sensor_offset)),
+        wxyz=config.IMU.pin_orientation_wxyz,
+    )
+    imu_mesh = _board_mesh(
+        server,
+        scene_path="/pin/imu/mesh",
+        dimensions=config.IMU.dimensions,
+        texture_name=config.IMU.texture,
+        is_atlas=config.IMU.is_atlas,
+        fallback_color=config.IMU.fallback_color,
+        assets_dir=assets_dir,
+    )
+    imu_sensor = server.scene.add_frame(
+        "/pin/imu/sensor",
+        show_axes=True,
+        axes_length=0.008,
+        axes_radius=0.0008,
+        position=config.IMU.sensor_offset,
+    )
+
+    # Three ToFs.
+    tofs: list[ToFHandles] = []
+    for mount in config.TOFS:
+        path = slug_path(mount.name)
+        board_path = f"/pin/{path}"
+        mesh_path = f"{board_path}/mesh"
+        sensor_path = f"{board_path}/sensor"
+
+        # Board frame: the board's *centre* is offset from the sensor active
+        # point so the texture sits behind the optical axis, not on top of it.
+        board_position = tuple(
+            np.array(mount.pin_position)
+            - _rotate(mount.pin_orientation_wxyz, mount.sensor_offset)
+        )
+        board = server.scene.add_frame(
+            board_path,
+            show_axes=False,
+            position=board_position,
+            wxyz=mount.pin_orientation_wxyz,
+        )
+        mesh = _board_mesh(
+            server,
+            scene_path=mesh_path,
+            dimensions=mount.dimensions,
+            texture_name=mount.texture,
+            is_atlas=mount.is_atlas,
+            fallback_color=mount.fallback_color,
+            assets_dir=assets_dir,
+        )
+
+        # Sensor frame: sensor's optical centre at mount.pin_position with
+        # the same orientation as the board frame (so rays go straight out
+        # along +Z_sensor).
+        sensor = server.scene.add_frame(
+            sensor_path,
+            show_axes=True,
+            axes_length=0.008,
+            axes_radius=0.0008,
+            position=mount.sensor_offset,
+        )
+
+        if mount.kind is SensorKind.GRID_8X8:
+            rays = _create_grid_rays(server, sensor_path, zone_angles)
+            point_path = f"{sensor_path}/points"
+        else:
+            color = mount.fallback_color[:3] if mount.fallback_color else (255, 200, 80)
+            rays = _create_single_zone_ray(server, sensor_path, color)
+            point_path = f"{sensor_path}/point"
+
+        tofs.append(ToFHandles(
+            mount=mount,
+            board=board,
+            mesh=mesh,
+            sensor=sensor,
+            rays=rays,
+            point_path=point_path,
+        ))
+
+    return SceneHandles(
+        pin=pin,
+        imu_board=imu_board,
+        imu_mesh=imu_mesh,
+        imu_sensor=imu_sensor,
+        tofs=tofs,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Front-grid ray updater (visible toggle + optional clip-to-measurement).
+# ────────────────────────────────────────────────────────────────────────────
+
+def update_grid_rays(
+    server: viser.ViserServer,
+    tof: ToFHandles,
+    zone_angles: ZoneAngles,
+    visible: bool,
+    distances_mm: np.ndarray | None = None,
+) -> list:
+    """Recreate the front grid's 64 rays, optionally clipping each to the
+    last-measured distance. Returns the new handles; the caller should
+    replace its stored list with the result."""
+
+    if tof.mount.kind is not SensorKind.GRID_8X8:
+        return tof.rays
+
+    parent_path = f"/pin/{slug_path(tof.mount.name)}/sensor"
+    min_z = config.MIN_RANGE_MM / 1000.0
+    max_z = config.MAX_RANGE_MM / 1000.0
 
     new_rays = []
     for i in range(config.NUM_ZONES):
-        if method == CoordinateMethod.UNIFORM:
-            # Use tangent-based directions
-            dir_x = zone_angles.tan_x[i]
-            dir_y = zone_angles.tan_y[i]
-            dir_z = 1.0
+        if distances_mm is not None and distances_mm[i] >= config.MIN_RANGE_MM:
+            end_z = min(distances_mm[i] / 1000.0, max_z)
         else:
-            # Use ST lookup ray directions (already normalized)
-            dir_x = zone_angles.st_ray_dir_x[i]
-            dir_y = zone_angles.st_ray_dir_y[i]
-            dir_z = zone_angles.st_ray_dir_z[i]
-            # Scale to match tangent-style (z=1 convention)
-            if dir_z > 0:
-                dir_x = dir_x / dir_z
-                dir_y = dir_y / dir_z
-                dir_z = 1.0
+            end_z = max_z
 
-        # Use measured distance if provided and valid, otherwise max range
-        if distances is not None and distances[i] >= config.MIN_RANGE_MM:
-            end_range = distances[i] / 1000
-        else:
-            end_range = max_range
-
-        start = np.array([
-            min_range * dir_x,
-            min_range * dir_y,
-            min_range * dir_z,
-        ], dtype=np.float32)
-        end = np.array([
-            end_range * dir_x,
-            end_range * dir_y,
-            end_range * dir_z,
-        ], dtype=np.float32)
-
-        ray = server.scene.add_spline_catmull_rom(
-            f"/breadboard/tof/sensor/rays/ray_{i}",
+        start = [
+            min_z * zone_angles.tan_x[i],
+            min_z * zone_angles.tan_y[i],
+            min_z,
+        ]
+        end = [
+            end_z * zone_angles.tan_x[i],
+            end_z * zone_angles.tan_y[i],
+            end_z,
+        ]
+        new_rays.append(server.scene.add_spline_catmull_rom(
+            f"{parent_path}/rays/ray_{i}",
             positions=np.array([start, end], dtype=np.float32),
             color=(100, 150, 255),
             line_width=1.0,
             visible=visible,
-        )
-        new_rays.append(ray)
-
+        ))
+    tof.rays = new_rays
     return new_rays
+
+
+def update_single_zone_ray(
+    server: viser.ViserServer,
+    tof: ToFHandles,
+    visible: bool,
+    distance_mm: float,
+) -> None:
+    """Update a single-zone ToF's ray to reflect the latest measurement."""
+    if tof.mount.kind is not SensorKind.SINGLE_ZONE:
+        return
+
+    parent_path = f"/pin/{slug_path(tof.mount.name)}/sensor"
+    min_z = config.SINGLE_ZONE_MIN_MM / 1000.0
+    if distance_mm is not None and distance_mm >= config.SINGLE_ZONE_MIN_MM:
+        end_z = min(distance_mm / 1000.0, config.SINGLE_ZONE_MAX_MM / 1000.0)
+    else:
+        end_z = config.SINGLE_ZONE_MAX_MM / 1000.0
+
+    color = tof.mount.fallback_color[:3] if tof.mount.fallback_color else (255, 200, 80)
+    ray = server.scene.add_spline_catmull_rom(
+        f"{parent_path}/ray",
+        positions=np.array([[0, 0, min_z], [0, 0, end_z]], dtype=np.float32),
+        color=color,
+        line_width=2.0,
+        visible=visible,
+    )
+    tof.rays = [ray]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Helpers.
+# ────────────────────────────────────────────────────────────────────────────
+
+def slug_path(name: str) -> str:
+    """Cheap slug for use as a Viser scene-path component."""
+    s = name.lower()
+    for ch in " ,()°":
+        s = s.replace(ch, "_")
+    while "__" in s:
+        s = s.replace("__", "_")
+    return s.strip("_")
+
+
+def _rotate(wxyz: tuple[float, float, float, float], vec: tuple[float, float, float]) -> np.ndarray:
+    """Rotate a 3-vector by a unit WXYZ quaternion."""
+    w, x, y, z = wxyz
+    vx, vy, vz = vec
+    # quaternion rotation: v' = q * v * q⁻¹
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return np.array([
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    ])

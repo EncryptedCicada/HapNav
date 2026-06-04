@@ -1,4 +1,19 @@
-"""Serial communication with VL53L5CX sensor via ESP32."""
+"""Serial reader for the HapNav pin's PIN-prefixed JSON trace stream.
+
+The pin emits one line per sample, e.g.
+
+  PIN {"ts":4763,"a":[...],"g":[...],"q":[w,x,y,z],
+       "head":mm_or_-1,"down":mm_or_-1,
+       "obs":{"urg":[u0,u1,u2,u3],"near":mm_or_-1,"flags":"0xNN"},
+       "d":[..64..],"st":[..64..]}
+
+`a`/`g`/`obs`/`ts` are conveniences the firmware prints; we only need `q`,
+`d`/`st` for the front grid, and `head`/`down` for the single-zone ToFs.
+
+The 8×8 grid is only emitted on every ~20th sample (the firmware's
+`dump_grid` divisor); the reader caches the last-good grid in between so
+downstream code always has *some* current data to render.
+"""
 
 import json
 import logging
@@ -11,11 +26,14 @@ import serial
 
 from . import config
 
-logger = logging.getLogger("vl53l5cx_viewer.serial")
+logger = logging.getLogger("hapnav_pin_viewer.serial")
+
+
+_PIN_PREFIX = "PIN "
 
 
 class SerialReader:
-    """Background thread for reading sensor data over serial."""
+    """Background thread for reading PIN-prefixed JSON data from the pin."""
 
     def __init__(self, port: str, baud: int = 115200):
         self.port = port
@@ -23,94 +41,122 @@ class SerialReader:
         self.serial: serial.Serial | None = None
         self.running = False
 
-        # Data storage
-        self.distances = np.zeros(config.NUM_ZONES, dtype=np.float32)
-        self.status = np.zeros(config.NUM_ZONES, dtype=np.uint8)
-        self.quaternion = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)  # wxyz identity
-        self._imu_connected = False  # True if IMU data has been received
-        self._data_lock = threading.Lock()
+        self._lock = threading.Lock()
 
-        # FPS tracking
+        # Front grid (cached — emitted every ~20 samples).
+        self.front_distances = np.zeros(config.NUM_ZONES, dtype=np.float32)
+        self.front_status = np.zeros(config.NUM_ZONES, dtype=np.uint8)
+        self._front_seen = False
+
+        # Single-zone heads — refreshed every sample.
+        self.head_distance_mm: float = -1.0
+        self.down_distance_mm: float = -1.0
+
+        # Body→world quaternion from the BNO055 (already remapped by firmware).
+        self.quaternion = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self._imu_connected = False
+
+        # Obstacle overlay — drives the on-screen status panel.
+        self.urgency = np.zeros(4, dtype=np.uint8)
+        self.nearest_mm: int = -1
+        self.flags: int = 0
+
+        # FPS tracking.
         self._frame_count = 0
         self._last_fps_time = time.time()
-        self._data_fps = 0.0
+        self._fps = 0.0
 
         self._thread: threading.Thread | None = None
-        self._version_checked = False
+
+    # ── public read-side API ────────────────────────────────────────────
 
     @property
     def data_fps(self) -> float:
-        """Current data frame rate from sensor."""
-        with self._data_lock:
-            return self._data_fps
+        with self._lock:
+            return self._fps
 
     @property
     def imu_connected(self) -> bool:
-        """True if IMU data has been received (quat field present in serial data)."""
-        with self._data_lock:
+        with self._lock:
             return self._imu_connected
 
+    @property
+    def front_grid_received(self) -> bool:
+        """True once at least one grid frame has been parsed."""
+        with self._lock:
+            return self._front_seen
+
+    def get_frame(self) -> dict:
+        """Snapshot all latest sensor state. Returns a dict so callers can
+        ignore fields they don't care about; arrays are copies."""
+        with self._lock:
+            return {
+                "front_distances": self.front_distances.copy(),
+                "front_status": self.front_status.copy(),
+                "front_seen": self._front_seen,
+                "head_distance_mm": self.head_distance_mm,
+                "down_distance_mm": self.down_distance_mm,
+                "quaternion": self.quaternion.copy(),
+                "imu_connected": self._imu_connected,
+                "urgency": self.urgency.copy(),
+                "nearest_mm": self.nearest_mm,
+                "flags": self.flags,
+            }
+
+    # ── connection / thread lifecycle ───────────────────────────────────
+
     def connect(self):
-        """Open serial connection."""
         logger.info("Connecting to %s at %d baud...", self.port, self.baud)
         self.serial = serial.Serial(self.port, self.baud, timeout=1)
-        time.sleep(2)  # Wait for ESP32 to initialize
+        # The pin's CONFIG_BOOT_DELAY is 2 s; matching it here lets the
+        # boot banner drain before we start parsing.
+        time.sleep(2)
         self.serial.reset_input_buffer()
         logger.info("Serial connected")
 
     def start(self):
-        """Start the reader thread."""
         if self._thread is not None:
             return
-
         self.running = True
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
 
     def stop(self):
-        """Stop the reader thread and close serial."""
         self.running = False
         if self.serial:
-            self.serial.close()
+            try:
+                self.serial.close()
+            except Exception:
+                pass
         if self._thread:
             self._thread.join(timeout=1)
             self._thread = None
 
-    def get_data(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Get a copy of the latest distance, status, and quaternion data.
+    # ── validation helpers ──────────────────────────────────────────────
 
-        Returns:
-            Tuple of (distances, status, quaternion) arrays
-        """
-        with self._data_lock:
-            return self.distances.copy(), self.status.copy(), self.quaternion.copy()
-
-    def _validate_distances(self, distances: list) -> bool:
-        """Validate distance values are within expected range."""
-        for d in distances:
-            if not isinstance(d, (int, float)):
+    @staticmethod
+    def _is_finite_seq(seq) -> bool:
+        for v in seq:
+            if not isinstance(v, (int, float)):
                 return False
-            if math.isnan(d) or math.isinf(d):
+            if math.isnan(v) or math.isinf(v):
                 return False
         return True
 
-    def _validate_quaternion(self, quat: list) -> bool:
-        """Validate quaternion values."""
-        if len(quat) != 4:
-            return False
-        for q in quat:
-            if not isinstance(q, (int, float)):
-                return False
-            if math.isnan(q) or math.isinf(q):
-                return False
-        return True
+    @staticmethod
+    def _parse_flags(value) -> int:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value, 0)
+            except ValueError:
+                return 0
+        return 0
+
+    # ── reconnection ────────────────────────────────────────────────────
 
     def _reconnect(self) -> bool:
-        """Attempt to reconnect to serial port.
-
-        Returns:
-            True if reconnection successful, False otherwise
-        """
         try:
             if self.serial:
                 try:
@@ -118,7 +164,7 @@ class SerialReader:
                 except Exception:
                     pass
             self.serial = serial.Serial(self.port, self.baud, timeout=1)
-            time.sleep(2)  # Wait for ESP32/sensor to initialize
+            time.sleep(2)
             self.serial.reset_input_buffer()
             logger.info("Serial reconnected")
             return True
@@ -126,79 +172,86 @@ class SerialReader:
             logger.debug("Reconnection failed: %s", e)
             return False
 
+    # ── main read loop ──────────────────────────────────────────────────
+
     def _read_loop(self):
-        """Background thread to read serial data."""
         logger.info("Serial reader thread started")
         while self.running:
             try:
-                if self.serial and self.serial.is_open:
-                    line = self.serial.readline()
-                    if line:
-                        line_str = line.decode("utf-8", errors="ignore").strip()
-                        if line_str.startswith("{"):
-                            try:
-                                data = json.loads(line_str)
-                                if "distances" in data and "status" in data:
-                                    distances = data["distances"]
-                                    status = data["status"]
-                                    # Validate array lengths to handle corrupted serial data
-                                    if len(distances) != config.NUM_ZONES or len(status) != config.NUM_ZONES:
-                                        logger.warning(
-                                            "Invalid array lengths: distances=%d, status=%d (expected %d)",
-                                            len(distances), len(status), config.NUM_ZONES
-                                        )
-                                        continue
-                                    # Validate distance values
-                                    if not self._validate_distances(distances):
-                                        logger.warning("Invalid distance values detected (NaN/Inf)")
-                                        continue
-                                    # Validate quaternion if present
-                                    if "quat" in data and not self._validate_quaternion(data["quat"]):
-                                        logger.warning("Invalid quaternion values detected (NaN/Inf)")
-                                        data.pop("quat")  # Still process distances, skip bad quaternion
-                                    # Check version (warn once)
-                                    if not self._version_checked:
-                                        self._version_checked = True
-                                        firmware_version = data.get("v")
-                                        if firmware_version is None:
-                                            logger.warning(
-                                                "No version in data. "
-                                                "Firmware may be outdated - consider reflashing."
-                                            )
-                                        elif firmware_version != config.VERSION:
-                                            logger.warning(
-                                                "Version mismatch: firmware=%s, viewer=%s. "
-                                                "Consider reflashing the ESP32.",
-                                                firmware_version, config.VERSION
-                                            )
-                                    with self._data_lock:
-                                        self.distances = np.array(distances, dtype=np.float32)
-                                        self.status = np.array(status, dtype=np.uint8)
-                                        if "quat" in data:
-                                            self.quaternion = np.array(
-                                                data["quat"], dtype=np.float32
-                                            )
-                                            self._imu_connected = True
-                                        else:
-                                            logger.debug("No quaternion data in packet (IMU may not be connected or firmware outdated)")
-                                    # Track data FPS
-                                    self._frame_count += 1
-                                    now = time.time()
-                                    elapsed = now - self._last_fps_time
-                                    if elapsed >= 1.0:
-                                        with self._data_lock:
-                                            self._data_fps = self._frame_count / elapsed
-                                        self._frame_count = 0
-                                        self._last_fps_time = now
-                            except json.JSONDecodeError as e:
-                                logger.debug("JSON decode error: %s", e)
+                if not (self.serial and self.serial.is_open):
+                    time.sleep(0.1)
+                    continue
+
+                raw = self.serial.readline()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="ignore").strip()
+                if not line.startswith(_PIN_PREFIX):
+                    continue
+
+                payload = line[len(_PIN_PREFIX):].strip()
+                try:
+                    data = json.loads(payload)
+                except json.JSONDecodeError:
+                    # Common in the wild — interleaved logs, partial lines.
+                    continue
+
+                self._consume(data)
+
             except (serial.SerialException, OSError) as e:
                 if not self.running:
                     break
                 logger.warning("Serial connection lost: %s", e)
-                with self._data_lock:
-                    self._data_fps = 0.0  # Reset FPS indicator
+                with self._lock:
+                    self._fps = 0.0
                 while self.running:
                     if self._reconnect():
                         break
-                    time.sleep(1)  # Wait before retry
+                    time.sleep(1)
+
+    def _consume(self, data: dict):
+        """Validate + stash one parsed PIN frame."""
+        quat = data.get("q")
+        head = data.get("head")
+        down = data.get("down")
+        d = data.get("d")
+        st = data.get("st")
+        obs = data.get("obs", {})
+
+        new_grid_valid = False
+        if isinstance(d, list) and isinstance(st, list):
+            if len(d) == config.NUM_ZONES and len(st) == config.NUM_ZONES:
+                if self._is_finite_seq(d):
+                    new_grid_valid = True
+
+        with self._lock:
+            if isinstance(quat, list) and len(quat) == 4 and self._is_finite_seq(quat):
+                self.quaternion = np.asarray(quat, dtype=np.float32)
+                self._imu_connected = True
+
+            if isinstance(head, (int, float)) and not math.isnan(head):
+                self.head_distance_mm = float(head)
+            if isinstance(down, (int, float)) and not math.isnan(down):
+                self.down_distance_mm = float(down)
+
+            if new_grid_valid:
+                self.front_distances = np.asarray(d, dtype=np.float32)
+                self.front_status = np.asarray(st, dtype=np.uint8)
+                self._front_seen = True
+
+            if isinstance(obs, dict):
+                urg = obs.get("urg")
+                if isinstance(urg, list) and len(urg) == 4 and self._is_finite_seq(urg):
+                    self.urgency = np.asarray(urg, dtype=np.uint8)
+                near = obs.get("near")
+                if isinstance(near, (int, float)) and not math.isnan(near):
+                    self.nearest_mm = int(near)
+                self.flags = self._parse_flags(obs.get("flags", 0))
+
+            self._frame_count += 1
+            now = time.time()
+            elapsed = now - self._last_fps_time
+            if elapsed >= 1.0:
+                self._fps = self._frame_count / elapsed
+                self._frame_count = 0
+                self._last_fps_time = now

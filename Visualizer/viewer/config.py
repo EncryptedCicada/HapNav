@@ -1,80 +1,191 @@
-"""VL53L5CX sensor configuration constants."""
+"""HapNav pin sensor configuration.
+
+The original viewer was built around a breadboard carrying a single VL53L5CX
+and a separate BNO08x IMU. The pin is laid out differently: an integrated
+BNO055 (whose firmware does the body-frame axis remap so the quaternion it
+emits is already pin body → world) plus three ToFs muxed on one I²C bus —
+
+  * FRONT  VL53L5CX  (8×8 grid)  — optical axis aligned with pin "forward"
+                                   plus 8°  downtilt
+  * HEAD   VL53L1X   (single)    — optical axis aligned with pin "forward"
+                                   plus 20° uptilt
+  * DOWN   VL53L1X   (single)    — optical axis aligned with pin "forward"
+                                   plus 45° downtilt
+
+All three ToFs render with the VL53L5CX board texture for now (a placeholder
+until the proper assets/configs for the single-zone breakouts land).
+
+Pin body frame (matches the firmware's `obstacle.c`):
+  +X right, +Y back, +Z up — so "forward" is **-Y**.
+"""
 
 from dataclasses import dataclass
+from enum import Enum
+
+import numpy as np
 
 
-# Package version (semantic versioning) - must match firmware
-VERSION = "0.1.0"
+# ────────────────────────────────────────────────────────────────────────────
+# Front VL53L5CX specs (drives the 8×8 grid pipeline).
+# ────────────────────────────────────────────────────────────────────────────
 
-# Sensor resolution
-RESOLUTION = 8  # 8x8 zones
+RESOLUTION = 8                 # 8×8 zones
 NUM_ZONES = 64
+FOV_DIAGONAL_DEG = 65.0        # diagonal FoV; per-axis is FoV/√2 ≈ 45.96°
 
-# Field of view
-FOV_DIAGONAL_DEG = 65.0  # Diagonal field of view in degrees
+# Range gate for the front grid. The firmware uses 50–2000 mm in bench mode
+# (`obstacle.c:42`); we follow that here so the colour ramp and the ray cull
+# share the same bounds.
+MIN_RANGE_MM = 50
+MAX_RANGE_MM = 2000
 
-# Range limits
-MAX_RANGE_MM = 4000
-MIN_RANGE_MM = 20
+# VL53L1X (head + down) usable distance gate, in mm.
+SINGLE_ZONE_MIN_MM = 40
+SINGLE_ZONE_MAX_MM = 4000
+
+# Visualization frame rate.
+TARGET_FPS = 30
+FRAME_TIME = 1.0 / TARGET_FPS
+
+# Mapping mode thresholds (front grid only; see viewer.py).
+DOWNSAMPLE_POINT_THRESHOLD = 500
+DOWNSAMPLE_BUFFER_THRESHOLD = 15
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Sensor mount config.
+# ────────────────────────────────────────────────────────────────────────────
+
+class SensorKind(Enum):
+    """How many rays a ToF emits and therefore how it's rendered."""
+
+    GRID_8X8 = "grid_8x8"
+    SINGLE_ZONE = "single_zone"
 
 
 @dataclass
-class BoardConfig:
-    """Configuration for a sensor board."""
+class ToFMount:
+    """Where one ToF sits on the pin and how it's oriented.
 
-    # Board position in world coordinates (meters)
-    world_position: tuple[float, float, float]
-    # Sensor position relative to board center (meters)
+    `pin_position` is the location of the sensor's optical centre in pin-body
+    coordinates (meters).
+
+    `pin_orientation_wxyz` rotates the sensor's local frame
+    (+X right, +Y up, +Z forward = optical axis) into the pin body frame
+    (+X right, +Y back, +Z up). For "forward + tilt-down θ" the canonical
+    rotation is R_x(90° + θ): the first 90° around X takes sensor +Z onto
+    pin -Y (= forward), and the extra θ tilts the optical axis from -Y
+    toward -Z. Negative θ for uptilt.
+
+    `sensor_offset` is the chip-aperture offset relative to the board mesh
+    centre — used to place the mesh around the sensor's optical centre so
+    the textured breakout looks attached to the rays, not floating.
+    """
+
+    name: str
+    pin_position: tuple[float, float, float]
+    pin_orientation_wxyz: tuple[float, float, float, float]
     sensor_offset: tuple[float, float, float]
-    # Board physical dimensions: width, length, height (meters)
     dimensions: tuple[float, float, float]
-    # Texture filename (looked up in assets directory)
     texture: str
-    # Sensor yaw rotation around Z axis (degrees) - corrects sensor orientation
-    sensor_yaw_deg: float = 0.0
-    # Whether texture is a vertical atlas (top/bottom faces)
-    is_atlas: bool = False
-    # Fallback color if texture not found (RGBA)
-    fallback_color: tuple[int, int, int, int] = (128, 128, 128, 255)
+    kind: SensorKind
+    is_atlas: bool = True
+    fallback_color: tuple[int, int, int, int] = (0, 100, 0, 255)
 
 
-# IMU board: BNO08x on 15mm x 26mm breakout
-# World position: at origin, sensor chip is the reference point
-# Sensor offset: chip is ~4mm above board center in Y, flush with top surface in Z
-IMU_BOARD = BoardConfig(
-    world_position=(0.0, 0.0, 0.0),
-    sensor_offset=(0.0, 0.004, 0.0005),  # Sensor above and forward of board center
-    dimensions=(0.015, 0.026, 0.001),
-    texture="bno08x-atlas.png",
-    is_atlas=True,
-    fallback_color=(128, 0, 128, 255),  # Purple
-)
+@dataclass
+class IMUMount:
+    """Position of the BNO055 chip inside the pin. Purely cosmetic — the
+    quaternion still drives the *whole* pin frame's rotation, not just this
+    breakout. The board mesh just helps the viewer "look" like a pin."""
 
-# ToF board: VL53L5CX on 10mm x 16mm breakout
-# World position: ~1 inch (25.4mm) in -Y direction from IMU
-# Sensor offset: aperture is ~4mm from top edge, flush with top surface
-# Sensor yaw: 90° CCW to align sensor's internal coordinate system with world
-TOF_BOARD = BoardConfig(
-    world_position=(0.0, -0.0254, 0.0),
-    sensor_offset=(0.0, 0.004, 0.0005),  # Sensor above and forward of board center
+    name: str
+    pin_position: tuple[float, float, float]
+    pin_orientation_wxyz: tuple[float, float, float, float]
+    sensor_offset: tuple[float, float, float]
+    dimensions: tuple[float, float, float]
+    texture: str
+    is_atlas: bool = True
+    fallback_color: tuple[int, int, int, int] = (128, 0, 128, 255)
+
+
+def _x_axis_quat_deg(angle_deg: float) -> tuple[float, float, float, float]:
+    """Helper: WXYZ quaternion for a rotation around the pin's +X axis."""
+    a = np.deg2rad(angle_deg) / 2.0
+    return (float(np.cos(a)), float(np.sin(a)), 0.0, 0.0)
+
+
+# Pin anchor in the world frame. With the BENCH_MODE pin at ~17 cm above the
+# desk, Z = 0.17 puts the world "floor" plane at z=0 and the pin at a
+# realistic perch above it. Tune freely; rays/points are children of the pin.
+PIN_WORLD_POSITION = (0.0, 0.0, 0.17)
+
+
+# All three ToF breakouts re-use the VL53L5CX texture for now — when proper
+# VL53L1X assets land, swap the `texture` field per mount.
+_VL53L5CX_TEXTURE = "vl53l5cx-atlas.png"
+
+
+# Front VL53L5CX — pin "face" with 8° downtilt.
+TOF_FRONT = ToFMount(
+    name="Front (VL53L5CX, 8x8)",
+    pin_position=(0.0, -0.012, 0.005),
+    pin_orientation_wxyz=_x_axis_quat_deg(90.0 + 8.0),
+    sensor_offset=(0.0, 0.004, 0.0005),
     dimensions=(0.010, 0.016, 0.001),
-    texture="vl53l5cx-atlas.png",
-    sensor_yaw_deg=90.0,  # 90° CCW rotation to align with world frame
-    is_atlas=True,
-    fallback_color=(0, 100, 0, 255),  # Green
+    texture=_VL53L5CX_TEXTURE,
+    kind=SensorKind.GRID_8X8,
 )
 
-# Visualization settings
-TARGET_FPS = 30  # Target visualization frame rate
-FRAME_TIME = 1.0 / TARGET_FPS  # Time per frame in seconds
+# Head VL53L1X — top of pin face, +20° uptilt (i.e. optical axis above horizon).
+TOF_HEAD = ToFMount(
+    name="Head (VL53L1X, +20°)",
+    pin_position=(0.0, -0.012, 0.020),
+    pin_orientation_wxyz=_x_axis_quat_deg(90.0 - 20.0),
+    sensor_offset=(0.0, 0.004, 0.0005),
+    dimensions=(0.010, 0.016, 0.001),
+    texture=_VL53L5CX_TEXTURE,
+    kind=SensorKind.SINGLE_ZONE,
+    fallback_color=(160, 80, 80, 255),
+)
 
-# Mapping mode thresholds
-DOWNSAMPLE_POINT_THRESHOLD = 500  # Trigger downsampling after this many new points
-DOWNSAMPLE_BUFFER_THRESHOLD = 15  # Or after this many frame buffers
+# Down VL53L1X — bottom of pin face, 45° downtilt.
+TOF_DOWN = ToFMount(
+    name="Down (VL53L1X, 45°)",
+    pin_position=(0.0, -0.012, -0.010),
+    pin_orientation_wxyz=_x_axis_quat_deg(90.0 + 45.0),
+    sensor_offset=(0.0, 0.004, 0.0005),
+    dimensions=(0.010, 0.016, 0.001),
+    texture=_VL53L5CX_TEXTURE,
+    kind=SensorKind.SINGLE_ZONE,
+    fallback_color=(80, 80, 160, 255),
+)
 
-# ST-calibrated lookup tables for VL53L5CX coordinate conversion
-# Source: https://community.st.com/t5/imaging-sensors/vl53l5cx-multi-zone-sensor-get-x-y-z-of-points-relative-to/td-p/172929
-# These tables account for actual lens optical characteristics (non-uniform angular coverage)
+TOFS: tuple[ToFMount, ...] = (TOF_FRONT, TOF_HEAD, TOF_DOWN)
+
+
+# IMU — sit it slightly behind the front ToF, inside the pin body. The chip's
+# orientation here is just for the breakout mesh; the actual rotation comes
+# from the BNO055 quaternion and is applied to the whole /pin frame.
+#
+# `sensor_offset` is zero here because the BNO055+BMP280 BFF asset is laid
+# out so the board centre coincides with the chip's observation origin —
+# nothing to compensate for.
+IMU = IMUMount(
+    name="BNO055",
+    pin_position=(0.0, 0.005, 0.000),
+    pin_orientation_wxyz=(1.0, 0.0, 0.0, 0.0),
+    sensor_offset=(0.0, 0.0, 0.0),
+    dimensions=(0.015, 0.026, 0.001),
+    texture="bno055+bmp280-atlas.png",
+)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ST-calibrated lookup tables for the VL53L5CX. Unchanged from the original —
+# only the front grid uses these.
+# ────────────────────────────────────────────────────────────────────────────
+
 # fmt: off
 ST_PITCH_ANGLES_DEG = [
     59.00, 64.00, 67.50, 70.00, 70.00, 67.50, 64.00, 59.00,

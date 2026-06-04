@@ -1,104 +1,118 @@
-# VL53L5CX-BNO08X-viewer
+# HapNav pin live visualizer
 
-Real-time 3D point cloud viewer for the VL53L5CX multi-zone time-of-flight sensor with BNO085 IMU orientation tracking.
+Real-time 3D viewer for the HapNav chest pin's sensor stack — three muxed
+ToFs and a BNO055 IMU — rendered through [viser](https://viser.studio/).
 
-[![Watch the video](https://img.youtube.com/vi/s32OUzhjf4U/maxresdefault.jpg)](https://youtu.be/s32OUzhjf4U)
+The viewer connects to the pin's USB-Serial-JTAG console, parses the
+firmware's per-sample `PIN { … }` JSON trace, and shows:
 
-## Features
+- **Front VL53L5CX (8×8 grid)** — point cloud + 64 zone rays (with optional
+  clip-to-measurement and least-squares / RANSAC plane fitting). Mount: pin
+  face, 8° downtilt.
+- **Head VL53L1X (single zone)** — one ray and one hit point. Mount: top of
+  pin face, +20° uptilt.
+- **Down VL53L1X (single zone)** — one ray and one hit point. Mount: bottom
+  of pin face, 45° downtilt.
+- **BNO055** — every frame's quaternion rotates the entire `/pin` frame,
+  so all three ToFs rotate together with the physical pin.
+- **Obstacle overlay** — per-bin urgency (`L CL CR R`), nearest range, and
+  decoded flag bits (`STATIONARY`, `SENSOR_BLOCKED`, `MOSTLY_INVALID`,
+  `YAW_SLEWING`, `DROPOFF`, `HEAD_OBSTACLE`).
 
-- **64-zone 3D visualization** - See the VL53L5CX's 8x8 measurement grid as rays in 3D space
-- **Real-time IMU tracking** - BNO085 orientation rotates the virtual view to match physical movement
-- **Temporal filtering** - Exponential moving average smooths noisy measurements
-- **Plane fitting** - Least squares and RANSAC methods for surface detection
-- **Mapping mode** - Accumulate points over time to build a 3D map of your environment
+All three ToFs share the `vl53l5cx-atlas.png` texture as a placeholder
+until proper VL53L1X breakout assets land — sensor kind (`GRID_8X8` vs
+`SINGLE_ZONE`) drives the actual rendering, not the texture.
 
-## Hardware
-
-**Components (~£24 / $30 / €28 from AliExpress):**
-- ESP32 dev board (~£4)
-- VL53L5CX ToF sensor (~£5)
-- BNO085 IMU (~£15)
-
-**Wiring:**
-
-| VL53L5CX | ESP32   |
-| -------- | ------- |
-| VIN      | 3V3     |
-| GND      | GND     |
-| SDA      | GPIO 21 |
-| SCL      | GPIO 22 |
-| LPn      | GPIO 19 |
-
-| BNO085   | ESP32   |
-| -------- | ------- |
-| VIN      | 3V3     |
-| GND      | GND     |
-| SDA      | GPIO 21 |
-| SCL      | GPIO 22 |
-
-Both sensors share the I2C bus (same SDA/SCL pins).
-
-## Installation
-
-### ESP32 Firmware
-
-```bash
-# Install libraries
-arduino-cli lib install "SparkFun VL53L5CX Arduino Library"
-arduino-cli lib install "SparkFun BNO08x Cortex Based IMU"
-
-# Compile and upload
-arduino-cli compile --fqbn esp32:esp32:esp32 firmware/vl53l5cx_reader
-arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/cu.usbserial-0001 firmware/vl53l5cx_reader
-```
-
-### Python Viewer
+## Install
 
 ```bash
 pip install -r viewer/requirements.txt
 ```
 
-## Usage
+## Run
 
 ```bash
-python -m viewer --port /dev/cu.usbserial-0001
+python -m viewer --port /dev/ttyACM1
 ```
 
-Open http://localhost:8080 in your browser.
+Open <http://localhost:8080> in your browser.
 
 **Options:**
-- `--port`, `-p`: Serial port (default: `/dev/cu.usbserial-0001`)
-- `--baud`, `-b`: Baud rate (default: `115200`)
-- `--viser-port`: Viser server port (default: `8080`)
-- `--debug`: Enable verbose logging
 
-## Sensor Specs
+| Flag | Default | Purpose |
+|---|---|---|
+| `--port`, `-p` | `/dev/ttyACM1` | Serial device for the pin's USB-Serial-JTAG |
+| `--baud`, `-b` | `115200` | Baud rate |
+| `--host` | `0.0.0.0` | Viser bind address |
+| `--viser-port` | `8080` | Viser server port |
+| `--debug`, `-d` | off | Verbose logging |
 
-**VL53L5CX** ([datasheet](https://www.st.com/resource/en/datasheet/vl53l5cx.pdf)):
-- **FoV:** 65° diagonal
-- **Range:** 20mm - 4000mm
-- **Distance type:** Perpendicular (z-axis), not radial
+The pin's USB-Serial-JTAG typically enumerates as `/dev/ttyACMn` on Linux
+(the previous Adafruit ESP32 viewer defaulted to `/dev/cu.usbserial-0001`
+on macOS — adjust for your setup).
 
-| Resolution | Zones | Max Frequency |
-| ---------- | ----- | ------------- |
-| 4x4        | 16    | 60 Hz         |
-| 8x8        | 64    | 15 Hz         |
+## Serial protocol the viewer expects
 
-Currently configured for 8x8 at 15Hz.
+The pin firmware emits one line per sample (~83 Hz at 50 ms loop), prefixed
+with `PIN `:
 
-## Serial Protocol
-
-The ESP32 streams JSON over serial at 115200 baud:
-
-```json
-{"distances":[d0,d1,...,d63],"status":[s0,s1,...,s63],"quat":[w,x,y,z]}
+```
+PIN {"ts":4763,
+     "a":[ax,ay,az],          # body-frame accel (g)        — informational
+     "g":[gx,gy,gz],           # body-frame gyro (rad/s)      — informational
+     "q":[w,x,y,z],            # body→world quaternion (BNO055 NDOF, already remapped)
+     "head":mm_or_-1,          # head VL53L1X slant range
+     "down":mm_or_-1,          # down VL53L1X slant range
+     "obs":{"urg":[u0,u1,u2,u3], "near":mm_or_-1, "flags":"0xNN"},
+     "d":[..64..],             # front grid distances (mm) — only every ~20th sample
+     "st":[..64..]             # front grid statuses     — only every ~20th sample
+    }
 ```
 
-- `distances`: 64 values in mm (perpendicular distance)
-- `status`: 64 values (5 = valid measurement)
-- `quat`: IMU quaternion (w, x, y, z)
+The `d`/`st` grid is emitted at a fraction of the sample rate (firmware's
+`dump_grid` divisor) to keep the trace stream compact; the viewer caches
+the last-good grid and re-renders it between updates.
 
-Zones are row-major: 0-7 = row 0, 8-15 = row 1, etc.
+## Sensor specs
+
+**Front VL53L5CX** ([datasheet](https://www.st.com/resource/en/datasheet/vl53l5cx.pdf)):
+
+- FoV 65° diagonal (≈ 46° per axis, ±22.3°)
+- 8×8 zones → 5.575° angular resolution per zone
+- Reports perpendicular (z-axis) distance, not radial — chip does the
+  conversion internally
+- Range gate the viewer enforces: 50–2000 mm (matches firmware bench mode)
+
+**Head / Down VL53L1X** (single-zone, narrow FoV ~15–27° configurable):
+
+- Range gate the viewer enforces: 40–4000 mm
+- Rendered as one ray along the sensor optical axis with a single hit
+  point at the measured slant range
+
+## Pin body / world frame conventions
+
+The viewer uses the same convention as the firmware (`obstacle.c`):
+
+- **Pin body frame:** +X right, +Y back, +Z up. So "forward" is **-Y**.
+- **World frame:** axis-aligned with pin body in its rest pose. The BNO055
+  axis remap is done in the firmware (`CONFIG=0x18`, `SIGN=0x01`), so the
+  quaternion the viewer receives is already body→world — no further
+  rotation correction is applied.
+
+The pin assembly is anchored at `PIN_WORLD_POSITION` (default `(0, 0, 0.17)`,
+matching the ~17 cm bench-mode mount height); tune in `viewer/config.py`.
+
+## Mount tilt angles (configurable per ToF)
+
+| ToF | Position on pin | Optical axis tilt |
+|---|---|---|
+| Front VL53L5CX | face, middle | 8° below horizontal |
+| Head VL53L1X | face, top | 20° above horizontal |
+| Down VL53L1X | face, bottom | 45° below horizontal |
+
+Each ToF's mount quaternion is computed from a `R_x(90° + tilt)` rotation
+in `config.py`'s `_x_axis_quat_deg()` helper — positive tilt = downward,
+negative = upward.
 
 ## License
 

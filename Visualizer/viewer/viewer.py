@@ -1,465 +1,475 @@
 #!/usr/bin/env python3
-"""VL53L5CX Point Cloud Viewer - Main application."""
+"""HapNav pin live visualizer.
+
+Connects to the pin's USB-Serial-JTAG console (default `/dev/ttyACM1`,
+matching the firmware's per-sample `PIN {...}` trace), parses the JSON
+stream, and renders the three muxed ToFs + BNO055 IMU orientation in a
+Viser scene.
+
+Hierarchy / behaviour:
+  /pin                anchored at config.PIN_WORLD_POSITION, wxyz = BNO055 quaternion
+    /pin/imu          cosmetic BNO055 breakout
+    /pin/tof_front    VL53L5CX 8×8 — point cloud + 64 zone rays
+    /pin/tof_head     VL53L1X +20° — single ray + hit point
+    /pin/tof_down     VL53L1X 45° — single ray + hit point
+"""
 
 import argparse
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-import time
 
 import numpy as np
 import viser
-from scipy.spatial.transform import Rotation
 
 from . import config
+from .config import SensorKind
 from .filters import TemporalFilter, fit_plane, fit_plane_ransac
 from .geometry import (
     CoordinateMethod,
     compute_zone_angles,
-    correct_imu_to_tof_frame,
     distances_to_points,
     get_colors,
 )
 from .logging_config import setup_logging
-from .scene import create_grid, create_scene_hierarchy, update_zone_rays
+from .scene import (
+    SceneHandles,
+    ToFHandles,
+    create_grid,
+    create_scene_hierarchy,
+    slug_path,
+    update_grid_rays,
+    update_single_zone_ray,
+)
 from .serial_reader import SerialReader
 
-logger = logging.getLogger("vl53l5cx_viewer.main")
+logger = logging.getLogger("hapnav_pin_viewer.main")
+
+
+# Bit positions of the obstacle flag byte (mirrors firmware ble_proto.h).
+FLAG_NAMES = [
+    (0x01, "STATIONARY"),
+    (0x02, "SENSOR_BLOCKED"),
+    (0x04, "MOSTLY_INVALID"),
+    (0x08, "YAW_SLEWING"),
+    (0x10, "DROPOFF"),
+    (0x20, "HEAD_OBSTACLE"),
+]
 
 
 @dataclass
 class MappingState:
-    """State for mapping mode point accumulation (world coordinates)."""
+    """World-space accumulation for the front 8×8 grid only."""
 
-    accumulated_points: list[np.ndarray] = field(default_factory=list)
-    accumulated_colors: list[np.ndarray] = field(default_factory=list)
+    points: list[np.ndarray] = field(default_factory=list)
+    colors: list[np.ndarray] = field(default_factory=list)
     _clear_requested: bool = False
 
     def request_clear(self):
-        """Request a clear - will be processed in the main loop."""
         self._clear_requested = True
 
     def process_clear_if_requested(self) -> bool:
-        """Process pending clear request. Returns True if cleared."""
         if self._clear_requested:
             self._clear_requested = False
-            self.accumulated_points.clear()
-            self.accumulated_colors.clear()
+            self.points.clear()
+            self.colors.clear()
             return True
         return False
 
-    def add(self, points: np.ndarray, colors: np.ndarray):
-        self.accumulated_points.append(points)
-        self.accumulated_colors.append(colors)
+    def add(self, pts: np.ndarray, cols: np.ndarray):
+        self.points.append(pts)
+        self.colors.append(cols)
 
     def get_display_data(self) -> tuple[np.ndarray, np.ndarray]:
-        if not self.accumulated_points:
+        if not self.points:
             return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.uint8)
-        if len(self.accumulated_points) == 1:
-            return self.accumulated_points[0], self.accumulated_colors[0]
-        return np.vstack(self.accumulated_points), np.vstack(self.accumulated_colors)
+        if len(self.points) == 1:
+            return self.points[0], self.colors[0]
+        return np.vstack(self.points), np.vstack(self.colors)
 
     def total_points(self) -> int:
-        return sum(len(p) for p in self.accumulated_points)
+        return sum(len(p) for p in self.points)
 
     def downsample(self, voxel_size: float, max_points: int):
-        if not self.accumulated_points:
+        if not self.points:
             return
-        all_points = np.vstack(self.accumulated_points)
-        all_colors = np.vstack(self.accumulated_colors)
-        all_points, all_colors = voxel_downsample(all_points, all_colors, voxel_size)
-        if len(all_points) > max_points:
-            all_points = all_points[-max_points:]
-            all_colors = all_colors[-max_points:]
-        self.accumulated_points.clear()
-        self.accumulated_points.append(all_points)
-        self.accumulated_colors.clear()
-        self.accumulated_colors.append(all_colors)
+        all_pts = np.vstack(self.points)
+        all_cols = np.vstack(self.colors)
+        all_pts, all_cols = voxel_downsample(all_pts, all_cols, voxel_size)
+        if len(all_pts) > max_points:
+            all_pts = all_pts[-max_points:]
+            all_cols = all_cols[-max_points:]
+        self.points = [all_pts]
+        self.colors = [all_cols]
 
 
-def voxel_downsample(
-    points: np.ndarray, colors: np.ndarray, voxel_size: float
-) -> tuple[np.ndarray, np.ndarray]:
+def voxel_downsample(points: np.ndarray, colors: np.ndarray, voxel_size: float):
     if len(points) == 0:
         return points, colors
-    voxel_indices = np.ascontiguousarray(np.floor(points / voxel_size).astype(np.int64))
-    keys = voxel_indices.view(dtype=[("x", np.int64), ("y", np.int64), ("z", np.int64)]).ravel()
+    vi = np.ascontiguousarray(np.floor(points / voxel_size).astype(np.int64))
+    keys = vi.view(dtype=[("x", np.int64), ("y", np.int64), ("z", np.int64)]).ravel()
     _, unique_idx = np.unique(keys, return_index=True)
     return points[unique_idx], colors[unique_idx]
 
 
-class VL53L5CXViewer:
-    """Real-time point cloud viewer for VL53L5CX ToF sensor."""
+class HapNavViewer:
+    """Live viewer for one HapNav pin instance."""
 
     def __init__(self, port: str, baud: int = 115200):
         self.serial_reader = SerialReader(port, baud)
         self.zone_angles = compute_zone_angles()
         self.temporal_filter = TemporalFilter()
 
-        # Compute board positions and offsets
-        self.imu_board_center = (
-            np.array(config.IMU_BOARD.world_position)
-            - np.array(config.IMU_BOARD.sensor_offset)
-        )
-        self.tof_board_center = (
-            np.array(config.TOF_BOARD.world_position)
-            - np.array(config.TOF_BOARD.sensor_offset)
-        )
-        # Offset from IMU sensor to ToF sensor (for rotating ToF position when IMU active)
-        self.imu_to_tof_offset = (
-            np.array(config.TOF_BOARD.world_position)
-            - np.array(config.IMU_BOARD.world_position)
-        )
+    # ── setup ───────────────────────────────────────────────────────────
 
     def _setup_scene(self, server: viser.ViserServer):
-        """Initialize the 3D scene."""
-        server.scene.add_frame("/origin", axes_length=0.002, axes_radius=0.0001)
         create_grid(server)
         assets_dir = Path(__file__).parent.parent / "assets"
-        self.scene = create_scene_hierarchy(server, assets_dir, self.zone_angles)
+        self.scene: SceneHandles = create_scene_hierarchy(
+            server, assets_dir, self.zone_angles
+        )
 
     def _setup_gui(self, server: viser.ViserServer, mapping_state: MappingState):
-        """Initialize GUI controls."""
-        with server.gui.add_folder("Sensor Info"):
-            self.distance_text = server.gui.add_text("Status", initial_value="Waiting...")
-            self.freq_text = server.gui.add_text("Frequency (Hz)", initial_value="0")
-            self.imu_status_text = server.gui.add_text("IMU", initial_value="Not detected")
+        with server.gui.add_folder("Pin status"):
+            self.fps_text = server.gui.add_text("Frames/s", initial_value="0")
+            self.imu_text = server.gui.add_text("IMU", initial_value="Not connected")
+            self.front_text = server.gui.add_text("Front 8×8", initial_value="Waiting…")
+            self.head_text = server.gui.add_text("Head ToF (mm)", initial_value="—")
+            self.down_text = server.gui.add_text("Down ToF (mm)", initial_value="—")
+            self.urgency_text = server.gui.add_text("Urgency [L CL CR R]", initial_value="0 0 0 0")
+            self.flags_text = server.gui.add_text("Obstacle flags", initial_value="—")
 
-        with server.gui.add_folder("Settings"):
-            self.point_size_slider = server.gui.add_slider(
+        with server.gui.add_folder("Display"):
+            self.point_size = server.gui.add_slider(
                 "Point Size", min=0.001, max=0.020, step=0.001, initial_value=0.005
             )
-            self.show_rays_checkbox = server.gui.add_checkbox("Show Zone Rays", initial_value=True)
-            self.clip_rays_checkbox = server.gui.add_checkbox(
-                "Clip to Measurement", initial_value=False
-            )
+            self.show_rays = server.gui.add_checkbox("Show Zone Rays", initial_value=True)
+            self.clip_rays = server.gui.add_checkbox("Clip to Measurement", initial_value=False)
 
-            @self.show_rays_checkbox.on_update
-            def _on_show_rays_toggle(event: viser.GuiEvent) -> None:
-                self.clip_rays_checkbox.disabled = not self.show_rays_checkbox.value
-
-            @self.clip_rays_checkbox.on_update
-            def _on_clip_rays_toggle(event: viser.GuiEvent) -> None:
-                if not self.clip_rays_checkbox.value:
-                    # Recreate full-length rays when clip mode is disabled
-                    method = next(
-                        m for m in CoordinateMethod if m.value == self.coord_method_dropdown.value
-                    )
-                    self.scene.zone_rays = update_zone_rays(
-                        server, self.zone_angles, method, visible=self.show_rays_checkbox.value
-                    )
+            @self.show_rays.on_update
+            def _(_event):
+                self.clip_rays.disabled = not self.show_rays.value
 
             server.gui.add_markdown("---")
-            self.coord_method_dropdown = server.gui.add_dropdown(
-                "Coordinate Method",
+            self.coord_method = server.gui.add_dropdown(
+                "Front grid method",
                 options=[m.value for m in CoordinateMethod],
                 initial_value=CoordinateMethod.UNIFORM.value,
             )
 
-            @self.coord_method_dropdown.on_update
-            def _on_coord_method_change(event: viser.GuiEvent) -> None:
-                method = next(
-                    m for m in CoordinateMethod if m.value == self.coord_method_dropdown.value
-                )
-                # Update rays and replace stale handles
-                self.scene.zone_rays = update_zone_rays(
-                    server, self.zone_angles, method, visible=self.show_rays_checkbox.value
-                )
-
             server.gui.add_markdown("---")
-            self.imu_rotation_checkbox = server.gui.add_checkbox(
+            self.apply_imu = server.gui.add_checkbox(
                 "Apply IMU Rotation", initial_value=True
             )
             server.gui.add_markdown("---")
-            self.filter_checkbox = server.gui.add_checkbox("Enable Filtering", initial_value=False)
-            self.filter_strength_slider = server.gui.add_slider(
-                "Filter Strength", min=0.0, max=1.0, step=0.05, initial_value=0.5, disabled=True
+            self.filter_on = server.gui.add_checkbox("Front grid filtering", initial_value=False)
+            self.filter_strength = server.gui.add_slider(
+                "Filter Strength", min=0.0, max=1.0, step=0.05,
+                initial_value=0.5, disabled=True,
             )
 
-            @self.filter_checkbox.on_update
-            def _on_filter_toggle(event: viser.GuiEvent) -> None:
-                self.filter_strength_slider.disabled = not self.filter_checkbox.value
-                if not self.filter_checkbox.value:
+            @self.filter_on.on_update
+            def _(_event):
+                self.filter_strength.disabled = not self.filter_on.value
+                if not self.filter_on.value:
                     self.temporal_filter.reset()
 
             server.gui.add_markdown("---")
-            self.fit_plane_checkbox = server.gui.add_checkbox("Fit Plane", initial_value=False)
-            self.plane_method_dropdown = server.gui.add_dropdown(
-                "Method",
+            self.fit_plane_on = server.gui.add_checkbox("Fit Plane (front)", initial_value=False)
+            self.plane_method = server.gui.add_dropdown(
+                "Plane method",
                 options=["Least Squares", "RANSAC"],
                 initial_value="Least Squares",
                 disabled=True,
             )
-            self.ransac_threshold_slider = server.gui.add_slider(
-                "RANSAC Threshold (mm)", min=1, max=50, step=1, initial_value=10, visible=False
+            self.ransac_thr = server.gui.add_slider(
+                "RANSAC Threshold (mm)", min=1, max=50, step=1,
+                initial_value=10, visible=False,
             )
-            self.plane_error_text = server.gui.add_text(
-                "Plane RMSE (mm)", initial_value="--"
-            )
+            self.plane_rmse = server.gui.add_text("Plane RMSE (mm)", initial_value="—")
 
-            @self.fit_plane_checkbox.on_update
-            def _on_fit_plane_toggle(event: viser.GuiEvent) -> None:
-                self.plane_method_dropdown.disabled = not self.fit_plane_checkbox.value
-                self.ransac_threshold_slider.visible = (
-                    self.fit_plane_checkbox.value
-                    and self.plane_method_dropdown.value == "RANSAC"
+            @self.fit_plane_on.on_update
+            def _(_event):
+                self.plane_method.disabled = not self.fit_plane_on.value
+                self.ransac_thr.visible = (
+                    self.fit_plane_on.value
+                    and self.plane_method.value == "RANSAC"
                 )
-                if not self.fit_plane_checkbox.value:
-                    self.plane_error_text.value = "--"
+                if not self.fit_plane_on.value:
+                    self.plane_rmse.value = "—"
 
-            @self.plane_method_dropdown.on_update
-            def _on_plane_method_change(event: viser.GuiEvent) -> None:
-                self.ransac_threshold_slider.visible = (
-                    self.plane_method_dropdown.value == "RANSAC"
-                )
+            @self.plane_method.on_update
+            def _(_event):
+                self.ransac_thr.visible = self.plane_method.value == "RANSAC"
 
-        with server.gui.add_folder("Mapping"):
-            self.mapping_checkbox = server.gui.add_checkbox("Mapping Mode", initial_value=False)
-            self.voxel_size_slider = server.gui.add_slider(
+        with server.gui.add_folder("Mapping (front grid)"):
+            self.mapping_on = server.gui.add_checkbox("Mapping Mode", initial_value=False)
+            self.voxel = server.gui.add_slider(
                 "Voxel Size (mm)", min=5, max=50, step=5, initial_value=10
             )
-            self.max_points_slider = server.gui.add_slider(
+            self.max_pts = server.gui.add_slider(
                 "Max Points (k)", min=10, max=500, step=10, initial_value=100
             )
-            self.point_count_text = server.gui.add_text("Points", initial_value="0")
-            clear_button = server.gui.add_button("Clear Map")
+            self.point_count = server.gui.add_text("Points", initial_value="0")
+            clear_btn = server.gui.add_button("Clear Map")
 
-            @clear_button.on_click
-            def _on_clear_click(event: viser.GuiEvent) -> None:
+            @clear_btn.on_click
+            def _(_event):
                 mapping_state.request_clear()
 
-            @self.mapping_checkbox.on_update
-            def _on_mapping_toggle(event: viser.GuiEvent) -> None:
-                if self.mapping_checkbox.value:
-                    # Entering mapping mode: remove live points
-                    server.scene.remove_by_name("/breadboard/tof/sensor/points")
-                else:
-                    # Exiting mapping mode: clear accumulated map
-                    mapping_state.request_clear()
+    # ── per-frame ───────────────────────────────────────────────────────
 
-    def _update_scene_transforms(
-        self, corrected_quat: np.ndarray, imu_connected: bool, apply_rotation: bool
-    ) -> tuple[np.ndarray, Rotation] | None:
-        """Update board frame transforms based on IMU orientation.
+    def _apply_pin_rotation(self, quaternion: np.ndarray, imu_connected: bool):
+        """Set /pin's wxyz to the BNO055 quaternion.
 
-        Returns (tof_sensor_world_pos, tof_world_rot) if IMU active, else None.
+        The BNO055 axis remap is already applied in firmware (CONFIG=0x18,
+        SIGN=0x01), so what we receive is body→world directly — no extra
+        correction needed here.
         """
-        imu_sensor_pos = np.array(config.IMU_BOARD.world_position)
-
-        if apply_rotation and imu_connected:
-            # Convert corrected quaternion to Rotation
-            imu_rot = Rotation.from_quat(
-                [corrected_quat[1], corrected_quat[2], corrected_quat[3], corrected_quat[0]]
-            )
-
-            # IMU board rotates around IMU sensor position
-            self.scene.imu_board.wxyz = tuple(corrected_quat)
-            # Board center position when rotated (sensor stays at world_position)
-            imu_board_offset = -np.array(config.IMU_BOARD.sensor_offset)
-            rotated_imu_board_offset = imu_rot.apply(imu_board_offset)
-            self.scene.imu_board.position = tuple(imu_sensor_pos + rotated_imu_board_offset)
-
-            # ToF sensor position: IMU sensor + rotated offset
-            tof_sensor_pos = imu_sensor_pos + imu_rot.apply(self.imu_to_tof_offset)
-            # ToF board rotates with IMU
-            self.scene.tof_board.wxyz = tuple(corrected_quat)
-            tof_board_offset = -np.array(config.TOF_BOARD.sensor_offset)
-            rotated_tof_board_offset = imu_rot.apply(tof_board_offset)
-            self.scene.tof_board.position = tuple(tof_sensor_pos + rotated_tof_board_offset)
-
-            return tof_sensor_pos, imu_rot
+        if self.apply_imu.value and imu_connected:
+            self.scene.pin.wxyz = tuple(float(x) for x in quaternion)
         else:
-            # Reset to configured positions
-            self.scene.imu_board.wxyz = (1.0, 0.0, 0.0, 0.0)
-            self.scene.imu_board.position = tuple(self.imu_board_center)
-            self.scene.tof_board.wxyz = (1.0, 0.0, 0.0, 0.0)
-            self.scene.tof_board.position = tuple(self.tof_board_center)
-            return None
+            self.scene.pin.wxyz = (1.0, 0.0, 0.0, 0.0)
 
-    def _process_frame(
-        self, server: viser.ViserServer, mapping_state: MappingState, plane_handle
+    def _update_front_grid(
+        self,
+        server: viser.ViserServer,
+        tof: ToFHandles,
+        distances: np.ndarray,
+        status: np.ndarray,
+        front_seen: bool,
+        mapping_state: MappingState,
+        plane_handle,
     ):
-        """Process a single frame of sensor data."""
-        distances, status, quaternion = self.serial_reader.get_data()
+        """Update the front 8×8 grid: point cloud, mapping accumulation,
+        plane fit, and per-zone ray clipping."""
+        if not front_seen:
+            self.front_text.value = "Waiting…"
+            return plane_handle
 
-        if self.filter_checkbox.value:
-            distances = self.temporal_filter.apply(distances, self.filter_strength_slider.value)
-
-        imu_connected = self.serial_reader.imu_connected
-        self.imu_status_text.value = "Connected" if imu_connected else "Not detected"
-
-        corrected_quat = correct_imu_to_tof_frame(quaternion) if imu_connected else quaternion
-
-        # Handle clear request atomically in main loop (must be outside sensor data check)
-        if mapping_state.process_clear_if_requested():
-            self.point_count_text.value = "0"
-            server.scene.remove_by_name("/map/points")
-
-        if np.any(distances > 0):
-            # Get selected coordinate method
-            coord_method = next(
-                m for m in CoordinateMethod if m.value == self.coord_method_dropdown.value
+        if self.filter_on.value:
+            distances = self.temporal_filter.apply(
+                distances, self.filter_strength.value
             )
 
-            # Points in sensor-local coordinates (z forward from sensor)
-            points_local = distances_to_points(distances, self.zone_angles, coord_method)
-            colors = get_colors(distances, status)
-            valid_mask = (status == 5) & (distances >= config.MIN_RANGE_MM)
+        method = next(
+            m for m in CoordinateMethod if m.value == self.coord_method.value
+        )
 
-            # Update scene transforms and get world transform info
-            transform_result = self._update_scene_transforms(
-                corrected_quat, imu_connected, self.imu_rotation_checkbox.value
+        # The pin's firmware emits raw VL53L5CX status codes (5 = valid).
+        valid_mask = (status == 5) & (distances >= config.MIN_RANGE_MM)
+        points_local = distances_to_points(distances, self.zone_angles, method)
+        colors = get_colors(distances, status)
+
+        if not np.any(valid_mask):
+            self.front_text.value = "No valid pixels"
+            return plane_handle
+
+        valid_local = points_local[valid_mask].astype(np.float32)
+        valid_colors = colors[valid_mask]
+
+        if self.mapping_on.value:
+            # Accumulate in pin-local space; viser's parent transform will
+            # carry the IMU rotation onto the rendered points.
+            mapping_state.add(valid_local, valid_colors)
+            if (
+                mapping_state.total_points() > config.DOWNSAMPLE_POINT_THRESHOLD
+                or len(mapping_state.points) > config.DOWNSAMPLE_BUFFER_THRESHOLD
+            ):
+                mapping_state.downsample(self.voxel.value / 1000.0, self.max_pts.value * 1000)
+            display_points, display_colors = mapping_state.get_display_data()
+            self.point_count.value = f"{len(display_points):,}"
+            server.scene.add_point_cloud(
+                tof.point_path,
+                points=display_points,
+                colors=display_colors,
+                point_size=self.point_size.value,
+                point_shape="circle",
+            )
+        else:
+            server.scene.add_point_cloud(
+                tof.point_path,
+                points=valid_local,
+                colors=valid_colors,
+                point_size=self.point_size.value,
+                point_shape="circle",
             )
 
-            if np.any(valid_mask):
-                valid_local = points_local[valid_mask].astype(np.float32)
-                valid_colors = colors[valid_mask]
-
-                # For mapping mode, we need points in world coordinates
-                if self.mapping_checkbox.value:
-                    # Transform local points to world
-                    if transform_result is not None:
-                        tof_sensor_pos, imu_rot = transform_result
-                        # Apply sensor yaw, then IMU rotation, then translate
-                        sensor_yaw = Rotation.from_euler(
-                            "z", config.TOF_BOARD.sensor_yaw_deg, degrees=True
-                        )
-                        world_rot = imu_rot * sensor_yaw
-                        valid_world = world_rot.apply(valid_local) + tof_sensor_pos
-                    else:
-                        # Just sensor yaw + offset
-                        sensor_yaw = Rotation.from_euler(
-                            "z", config.TOF_BOARD.sensor_yaw_deg, degrees=True
-                        )
-                        valid_world = (
-                            sensor_yaw.apply(valid_local)
-                            + np.array(config.TOF_BOARD.world_position)
-                        )
-
-                    mapping_state.add(valid_world, valid_colors)
-
-                    if (
-                        mapping_state.total_points() > config.DOWNSAMPLE_POINT_THRESHOLD
-                        or len(mapping_state.accumulated_points)
-                        > config.DOWNSAMPLE_BUFFER_THRESHOLD
-                    ):
-                        voxel_size_m = self.voxel_size_slider.value / 1000.0
-                        max_pts = self.max_points_slider.value * 1000
-                        mapping_state.downsample(voxel_size_m, max_pts)
-
-                    display_points, display_colors = mapping_state.get_display_data()
-                    self.point_count_text.value = f"{len(display_points):,}"
-
-                    # Mapping points in world space
-                    server.scene.add_point_cloud(
-                        "/map/points",
-                        points=display_points,
-                        colors=display_colors,
-                        point_size=self.point_size_slider.value,
-                        point_shape="circle",
-                    )
-                else:
-                    # Live points in sensor-local coordinates (frame handles transform)
-                    server.scene.add_point_cloud(
-                        "/breadboard/tof/sensor/points",
-                        points=valid_local,
-                        colors=valid_colors,
-                        point_size=self.point_size_slider.value,
-                        point_shape="circle",
-                    )
-
-                # Plane fitting (in sensor-local for consistency with live view)
-                if self.fit_plane_checkbox.value and len(valid_local) >= 3:
-                    if self.plane_method_dropdown.value == "RANSAC":
-                        threshold_m = self.ransac_threshold_slider.value / 1000.0
-                        plane_fit = fit_plane_ransac(valid_local, threshold=threshold_m)
-                    else:
-                        plane_fit = fit_plane(valid_local)
-
-                    if plane_fit is not None:
-                        pos, wxyz, size, rmse_mm = plane_fit
-                        self.plane_error_text.value = f"{rmse_mm:.2f}"
-                        plane_handle = server.scene.add_box(
-                            "/breadboard/tof/sensor/plane",
-                            dimensions=(size, size, 0.0001),
-                            position=pos,
-                            wxyz=wxyz,
-                            color=(255, 255, 0),
-                            opacity=0.5,
-                        )
-
-                valid_distances = distances[valid_mask]
-                self.distance_text.value = (
-                    f"Range: {valid_distances.min():.0f}-{valid_distances.max():.0f}mm"
+        # Plane fit on the live front-grid points (sensor-local frame).
+        if self.fit_plane_on.value and len(valid_local) >= 3:
+            if self.plane_method.value == "RANSAC":
+                plane_fit = fit_plane_ransac(
+                    valid_local, threshold=self.ransac_thr.value / 1000.0
                 )
             else:
-                self.distance_text.value = "No valid data"
+                plane_fit = fit_plane(valid_local)
+            if plane_fit is not None:
+                pos, wxyz, size, rmse_mm = plane_fit
+                self.plane_rmse.value = f"{rmse_mm:.2f}"
+                plane_path = f"/pin/{slug_path(tof.mount.name)}/sensor/plane"
+                plane_handle = server.scene.add_box(
+                    plane_path,
+                    dimensions=(size, size, 0.0001),
+                    position=pos,
+                    wxyz=wxyz,
+                    color=(255, 255, 0),
+                    opacity=0.5,
+                )
 
-        if plane_handle is not None:
-            plane_handle.visible = self.fit_plane_checkbox.value
+        valid_distances = distances[valid_mask]
+        self.front_text.value = (
+            f"{int(valid_distances.min())}–{int(valid_distances.max())} mm "
+            f"({int(valid_mask.sum())}/{config.NUM_ZONES} valid)"
+        )
 
-        self.freq_text.value = f"{self.serial_reader.data_fps:.1f}"
-
-        # Update zone rays visibility and clipping
-        if self.show_rays_checkbox.value and self.clip_rays_checkbox.value:
-            # Recreate rays clipped to measured distances
-            coord_method = next(
-                m for m in CoordinateMethod if m.value == self.coord_method_dropdown.value
-            )
-            self.scene.zone_rays = update_zone_rays(
-                server, self.zone_angles, coord_method,
-                visible=True, distances=distances
+        # Per-zone ray update.
+        if self.show_rays.value:
+            update_grid_rays(
+                server, tof, self.zone_angles,
+                visible=True,
+                distances_mm=distances if self.clip_rays.value else None,
             )
         else:
-            for ray in self.scene.zone_rays:
-                ray.visible = self.show_rays_checkbox.value
+            for r in tof.rays:
+                r.visible = False
 
         return plane_handle
 
+    def _update_single_zone(
+        self,
+        server: viser.ViserServer,
+        tof: ToFHandles,
+        distance_mm: float,
+        gui_text,
+    ):
+        """Update a head/down ToF: ray length + single hit point."""
+        # GUI label.
+        gui_text.value = "—" if distance_mm < 0 else f"{int(distance_mm)}"
+
+        # Ray.
+        update_single_zone_ray(
+            server, tof,
+            visible=self.show_rays.value,
+            distance_mm=distance_mm,
+        )
+
+        # Single hit point in sensor-local coordinates.
+        if distance_mm >= config.SINGLE_ZONE_MIN_MM:
+            pt_z = min(distance_mm / 1000.0, config.SINGLE_ZONE_MAX_MM / 1000.0)
+            color = tof.mount.fallback_color[:3] if tof.mount.fallback_color else (255, 255, 0)
+            server.scene.add_point_cloud(
+                tof.point_path,
+                points=np.array([[0.0, 0.0, pt_z]], dtype=np.float32),
+                colors=np.array([color], dtype=np.uint8),
+                point_size=max(self.point_size.value * 2.0, 0.006),
+                point_shape="circle",
+            )
+        else:
+            server.scene.remove_by_name(tof.point_path)
+
+    def _update_overlay(self, urgency: np.ndarray, nearest_mm: int, flags: int):
+        self.urgency_text.value = " ".join(str(int(v)) for v in urgency)
+        active_flags = [name for bit, name in FLAG_NAMES if flags & bit]
+        if not active_flags:
+            label = f"0x{flags:02x}"
+        else:
+            label = f"0x{flags:02x}  " + " | ".join(active_flags)
+        if nearest_mm >= 0:
+            label += f"   near={nearest_mm} mm"
+        self.flags_text.value = label
+
+    def _process_frame(
+        self,
+        server: viser.ViserServer,
+        mapping_state: MappingState,
+        plane_handle,
+    ):
+        frame = self.serial_reader.get_frame()
+
+        # Status panel.
+        self.fps_text.value = f"{self.serial_reader.data_fps:.1f}"
+        self.imu_text.value = "Connected" if frame["imu_connected"] else "Not connected"
+
+        # Pin orientation.
+        self._apply_pin_rotation(frame["quaternion"], frame["imu_connected"])
+
+        # Mapping-mode clear handling (must run before adding new points).
+        if mapping_state.process_clear_if_requested():
+            self.point_count.value = "0"
+            # Remove every front-grid mapping point cloud explicitly.
+            for tof in self.scene.tofs:
+                if tof.mount.kind is SensorKind.GRID_8X8:
+                    server.scene.remove_by_name(tof.point_path)
+
+        # Per-ToF updates. Mount identity (config.TOF_*) drives which gauge
+        # / GUI label gets the reading.
+        for tof in self.scene.tofs:
+            if tof.mount is config.TOF_FRONT:
+                plane_handle = self._update_front_grid(
+                    server, tof,
+                    frame["front_distances"], frame["front_status"],
+                    frame["front_seen"],
+                    mapping_state, plane_handle,
+                )
+            elif tof.mount is config.TOF_HEAD:
+                self._update_single_zone(
+                    server, tof, frame["head_distance_mm"], self.head_text
+                )
+            elif tof.mount is config.TOF_DOWN:
+                self._update_single_zone(
+                    server, tof, frame["down_distance_mm"], self.down_text
+                )
+
+        # Obstacle overlay.
+        self._update_overlay(frame["urgency"], frame["nearest_mm"], frame["flags"])
+
+        if plane_handle is not None:
+            plane_handle.visible = self.fit_plane_on.value
+
+        return plane_handle
+
+    # ── main loop ───────────────────────────────────────────────────────
+
     def run(self, host: str = "0.0.0.0", port: int = 8080):
-        """Start the viewer."""
         self.serial_reader.connect()
         self.serial_reader.start()
 
         server = viser.ViserServer(host=host, port=port)
-        logger.info("Viser server started at http://localhost:%d", port)
+        logger.info("Viser server at http://localhost:%d", port)
 
         @server.on_client_connect
-        def on_client_connect(client: viser.ClientHandle) -> None:
-            client.camera.position = (0.0, -0.50, 0.50)
-            client.camera.look_at = (0.0, 0.0, 0.0)
+        def _on_client_connect(client: viser.ClientHandle):
+            client.camera.position = (0.6, -0.6, 0.5)
+            client.camera.look_at = config.PIN_WORLD_POSITION
             client.camera.up = (0.0, 0.0, 1.0)
             client.camera.near = 0.001
-            client.camera.fov = 0.35
+            client.camera.fov = 0.55
 
         mapping_state = MappingState()
         self._setup_scene(server)
         self._setup_gui(server, mapping_state)
 
         plane_handle = None
-
         try:
             while True:
-                frame_start = time.time()
+                t0 = time.time()
                 plane_handle = self._process_frame(server, mapping_state, plane_handle)
-
-                elapsed = time.time() - frame_start
-                if elapsed < config.FRAME_TIME:
-                    time.sleep(config.FRAME_TIME - elapsed)
-
+                dt = time.time() - t0
+                if dt < config.FRAME_TIME:
+                    time.sleep(config.FRAME_TIME - dt)
         except KeyboardInterrupt:
-            logger.info("Shutting down...")
+            logger.info("Shutting down…")
         finally:
             self.serial_reader.stop()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VL53L5CX Point Cloud Viewer")
+    parser = argparse.ArgumentParser(description="HapNav pin live visualizer")
     parser.add_argument(
-        "--port",
-        "-p",
-        default="/dev/cu.usbserial-0001",
-        help="Serial port (default: /dev/cu.usbserial-0001)",
+        "--port", "-p",
+        default="/dev/ttyACM1",
+        help="Serial port the pin is on (default: /dev/ttyACM1)",
     )
     parser.add_argument(
         "--baud", "-b", type=int, default=115200, help="Baud rate (default: 115200)"
@@ -468,17 +478,17 @@ def main():
         "--host", default="0.0.0.0", help="Viser server host (default: 0.0.0.0)"
     )
     parser.add_argument(
-        "--viser-port", type=int, default=8080, help="Viser server port (default: 8080)"
+        "--viser-port", type=int, default=8080,
+        help="Viser server port (default: 8080)"
     )
     parser.add_argument(
         "--debug", "-d", action="store_true", help="Enable debug logging"
     )
     args = parser.parse_args()
 
-    import logging
     setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
 
-    viewer = VL53L5CXViewer(port=args.port, baud=args.baud)
+    viewer = HapNavViewer(port=args.port, baud=args.baud)
     viewer.run(host=args.host, port=args.viser_port)
 
 
