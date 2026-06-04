@@ -62,14 +62,14 @@ config HAPNAV_BENCH_MODE
 	  constants so the full pipeline can be exercised on a desktop with
 	  the chest pin standing UPRIGHT on a desk — the VL53L5CX optical
 	  centre then sits ~ 1–2 cm above the surface and grazes along it —
-	  and objects moved within a 10–100 cm envelope.
+	  and objects moved within a 10 cm – 2 m envelope.
 
 	  Concretely:
 	    SENSOR_HEIGHT_M         1.35 m → 0.015 m
 	    FLOOR_BAND_HIGH_M      -1.20 m → -0.005 m  (desk plane = floor)
 	    HEAD_TOP_BAND_M         0.40 m → 0.10 m
 	    MIN_RANGE_MM             300   →   50
-	    MAX_RANGE_MM            3000   → 1000
+	    MAX_RANGE_MM            3000   → 2000
 	    CLUSTER_DELTA_MM         200   →   30
 	    HEAD_PROXIMITY_MAX_MM   2200   →  150
 	    dropoff predicted-range  3.5 m →  0.5 m

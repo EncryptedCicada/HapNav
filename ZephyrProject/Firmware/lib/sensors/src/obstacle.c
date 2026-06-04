@@ -22,7 +22,7 @@ LOG_MODULE_REGISTER(hapnav_obstacle, LOG_LEVEL_INF);
 #if defined(CONFIG_HAPNAV_BENCH_MODE)
 /* Bench-demo geometry: the pin stands UPRIGHT on a desk, so the VL53L5CX
  * optical centre sits ~1–2 cm above the desk surface and grazes along it
- * rather than looking down at it. Objects move within a 10–100 cm envelope.
+ * rather than looking down at it. Objects move within a 10 cm – 2 m envelope.
  * The stationary detector is defanged so a pin resting on the bench doesn't
  * mute the pipeline.
  *
@@ -39,7 +39,7 @@ LOG_MODULE_REGISTER(hapnav_obstacle, LOG_LEVEL_INF);
 #define HEAD_TOP_BAND_M          (USER_HEAD_ABOVE_SENSOR_M + HEAD_CLEARANCE_M)
 #define FLOOR_BAND_HIGH_M        (-0.005f)
 #define MIN_RANGE_MM             50
-#define MAX_RANGE_MM             1000
+#define MAX_RANGE_MM             2000
 #define CLUSTER_DELTA_MM         30
 /* Variance is always ≥ 0, so a threshold of −1 makes `var < THRESH`
  * unsatisfiable → stationary never fires. (Earlier I set this to 1e9

@@ -3,9 +3,9 @@
  *
  * I2C topology (XIAO Qwiic header → SoC i2c1):
  *   i2c1 ── tca9546a@70 (NXP PCA9546A-compatible mux)
- *           ├── ch0 → DA7280 @ 0x4A   LEFT
+ *           ├── ch0 → DA7280 @ 0x4A   CENTER-RIGHT
  *           ├── ch1 → DA7280 @ 0x4A   CENTER-LEFT
- *           ├── ch2 → DA7280 @ 0x4A   CENTER-RIGHT
+ *           ├── ch2 → DA7280 @ 0x4A   LEFT
  *           └── ch3 → DA7280 @ 0x4A   RIGHT
  *
  * The four DA7280s share the same 7-bit I2C address; the mux isolates
@@ -40,7 +40,7 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 
-			lra_l: da7280@4a {
+			lra_cr: da7280@4a {
 				compatible = "dlg,da7280";
 				reg = <0x4a>;
 				/*
@@ -120,7 +120,7 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 
-			lra_cr: da7280@4a {
+			lra_l: da7280@4a {
 				compatible = "dlg,da7280";
 				reg = <0x4a>;
 				/*
