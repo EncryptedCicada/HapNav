@@ -1,0 +1,32 @@
+# Byte-compiled / native extensions
+__pycache__/
+*.py[cod]
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg
+*.egg-info/
+
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Test / coverage / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+
+# IDE / editor
+.idea/
+.vscode/
+
+# OS
+.DS_Store
