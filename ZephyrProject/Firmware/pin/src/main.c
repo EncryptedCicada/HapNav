@@ -40,14 +40,16 @@ int main(void)
 		(void)gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
 	}
 
-	bool sensors_ok = (pin_sensors_init() == 0);
-	if (!sensors_ok) {
-		LOG_ERR("Sensor init failed — frame stream disabled, BLE link only");
-	}
-
+	/* Bring BLE up before the sensors so the link (advertising / scanning)
+	 * comes up even if a sensor or the I²C bus stalls during bring-up. */
 	if (pin_ble_init() != 0) {
 		LOG_ERR("BLE init failed");
 		return -EIO;
+	}
+
+	bool sensors_ok = (pin_sensors_init() == 0);
+	if (!sensors_ok) {
+		LOG_ERR("Sensor init failed — frame stream disabled, BLE link only");
 	}
 
 	LOG_INF("HapNav pin: entering ~83 Hz sample loop");
