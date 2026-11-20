@@ -22,6 +22,22 @@
 #define HAPNAV_UUID_SVC_VAL          HAPNAV_UUID_VAL(0x0001)
 #define HAPNAV_UUID_FRAME_VAL        HAPNAV_UUID_VAL(0x0004)
 
+/*
+ * Laptop link (CONFIG_HAPNAV_LINK_LAPTOP, pin = peripheral). Separate UUIDs so
+ * a laptop can't mistake the wristband for the pin.
+ *   service : 5a9c0010-7e6f-4abc-9c12-aabbccdd1100
+ *   frame   : 5a9c0011-7e6f-4abc-9c12-aabbccdd1100  (notify)
+ *
+ * Each hapnav_frame is split to fit the negotiated ATT MTU. Every
+ * notification is [1-byte header][payload]:
+ *   header bits 7..4 = frame sequence number (wraps at 16)
+ *   header bits 3..0 = chunk index within the frame (0 = first)
+ * Concatenating the payloads of chunks 0..N of one sequence number yields
+ * exactly HAPNAV_FRAME_SIZE bytes.
+ */
+#define HAPNAV_UUID_LAPTOP_SVC_VAL   HAPNAV_UUID_VAL(0x0010)
+#define HAPNAV_UUID_LAPTOP_FRAME_VAL HAPNAV_UUID_VAL(0x0011)
+
 #define HAPNAV_TOF_ZONES   64   /* 8x8 grid */
 
 /*
