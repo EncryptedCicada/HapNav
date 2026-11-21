@@ -91,8 +91,22 @@ def voxel_downsample(
 class VL53L5CXViewer:
     """Real-time point cloud viewer for VL53L5CX ToF sensor."""
 
-    def __init__(self, port: str, baud: int = 115200):
-        self.serial_reader = SerialReader(port, baud)
+    def __init__(self, port: str, baud: int = 115200, ble_name: str | None = None,
+                 log_dir: str | None = None, print_tof_every: int = 0):
+        # `serial_reader` is the data source; with ble_name set it is a
+        # BleReader (same interface) receiving frames from the chest pin.
+        # BLE mode only: log_dir records every frame as JSONL;
+        # print_tof_every > 0 prints the 8x8 ToF grid every N frames.
+        if ble_name:
+            from .ble_reader import BleReader
+            self.serial_reader = BleReader(name=ble_name, log_dir=log_dir,
+                                           print_every=print_tof_every)
+        else:
+            if log_dir:
+                logger.warning("--log is only supported with --ble; ignoring")
+            if print_tof_every:
+                logger.warning("--print-tof is only supported with --ble; ignoring")
+            self.serial_reader = SerialReader(port, baud)
         self.zone_angles = compute_zone_angles()
         self.temporal_filter = TemporalFilter()
 
@@ -506,12 +520,44 @@ def main():
     parser.add_argument(
         "--debug", "-d", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument(
+        "--ble", action="store_true",
+        help="Receive from the HapNav chest pin over BLE (laptop-link firmware) "
+             "instead of a serial port; needs `pip install bleak`",
+    )
+    parser.add_argument(
+        "--ble-name", default="HapNav-Pin",
+        help="BLE device name to look for with --ble (default: HapNav-Pin)",
+    )
+    parser.add_argument(
+        "--log", action="store_true",
+        help="With --ble: save every received frame (64 distances, status, "
+             "quaternion, obstacles) as JSON lines to "
+             "<log-dir>/ble_viewer_<timestamp>.jsonl",
+    )
+    parser.add_argument(
+        "--log-dir", default=None,
+        help="Directory for --log files (default: <repo>/Logs)",
+    )
+    parser.add_argument(
+        "--print-tof", type=int, nargs="?", const=33, default=0, metavar="N",
+        help="With --ble: print the 8x8 ToF distance grid (mm) to the terminal "
+             "every N frames (default N=33, about once per second; 1 = every frame). "
+             "Invalid zones show as ----",
+    )
     args = parser.parse_args()
 
     import logging
     setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
 
-    viewer = VL53L5CXViewer(port=args.port, baud=args.baud)
+    log_dir = None
+    if args.log:
+        from .ble_reader import DEFAULT_LOG_DIR
+        log_dir = args.log_dir or DEFAULT_LOG_DIR
+
+    viewer = VL53L5CXViewer(port=args.port, baud=args.baud,
+                            ble_name=args.ble_name if args.ble else None,
+                            log_dir=log_dir, print_tof_every=args.print_tof)
     viewer.run(host=args.host, port=args.viser_port)
 
 

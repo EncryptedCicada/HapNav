@@ -4,3 +4,4 @@ numpy>=1.20.0
 scipy>=1.10.0
 trimesh>=4.0.0
 Pillow>=9.0.0
+bleak>=0.22  # optional: only for `python -m viewer --ble`

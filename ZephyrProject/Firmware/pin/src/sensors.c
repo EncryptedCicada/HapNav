@@ -117,6 +117,25 @@ static void i2c_scan_log(const struct device *i2c)
 		LOG_ERR("I²C bus %s not ready — can't scan", i2c->name);
 		return;
 	}
+	/* Probe the mux first. A USB-only reset (west flash, RTS) restarts the
+	 * ESP32 but not the sensors; one cut off mid-transfer can hold SDA low
+	 * so every transaction times out (~0.5–1 s each → a 112-address scan
+	 * would take minutes). Try a bus recovery, and skip the scan if the
+	 * bus is still dead so the failure is visible in about a second. */
+	uint8_t probe;
+	int rc = i2c_read(i2c, &probe, 1, 0x70);
+	if (rc == -ETIMEDOUT || rc == -EBUSY) {
+		LOG_WRN("I²C bus stuck (mux probe %d) — attempting bus recovery", rc);
+		int rrc = i2c_recover_bus(i2c);
+		rc = i2c_read(i2c, &probe, 1, 0x70);
+		LOG_WRN("  recovery %d, mux re-probe %d", rrc, rc);
+		if (rc == -ETIMEDOUT || rc == -EBUSY) {
+			LOG_ERR("I²C bus still stuck — power-cycle the pin "
+				"(unplug USB) to reset the sensors");
+			return;
+		}
+	}
+
 	LOG_INF("I²C scan on %s (mux parent — child devices hide behind 0x70):", i2c->name);
 	int found = 0;
 	for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
