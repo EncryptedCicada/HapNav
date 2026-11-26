@@ -29,6 +29,9 @@ west build -p always -b xiao_esp32s3/esp32s3/procpu . -- -DEXTRA_CONF_FILE=prj_d
 # (overlays can be combined: -DEXTRA_CONF_FILE="prj_laptop.conf;prj_demo.conf")
 west build -p always -b xiao_esp32s3/esp32s3/procpu . -- -DEXTRA_CONF_FILE=prj_laptop.conf
 
+# Dual-link pin build: drives the wristband AND streams to a laptop at the same time
+west build -p always -b xiao_esp32s3/esp32s3/procpu . -- -DEXTRA_CONF_FILE=prj_dual.conf
+
 # Wristband (nRF52840)
 cd ZephyrProject/Firmware/wristband
 west build -p always -b xiao_ble .
@@ -47,8 +50,8 @@ Two Zephyr apps share code under `ZephyrProject/Firmware/lib/`. Each lib's `CMak
 - `lib/sensors/` (pin only): `vl53l5cx.c` (ULD wrapper), `bno055.c` (register-level I²C, no in-tree driver), `obstacle.c` (ToF grid → 4 azimuth-bin urgencies, habituation, stationary/yaw-slew/blocked flags), `dropoff.c` (down-ToF cliff detection).
 - `lib/haptics/` (wristband only): `haptics.c` is the drive policy. A 20 Hz work-queue tick maps urgency → amplitude, with a 250 ms watchdog that mutes on stale frames, plus fatigue taper, urgency "knocks" and override patterns for DROPOFF/HEAD flags. It also contains the `CONFIG_HAPNAV_SELFTEST` bench-test sequence, which disables BLE-driven reactions.
 - `modules/da7280-haptic/`: out-of-tree Zephyr module (DA7280 LRA driver + DT binding), registered via `ZEPHYR_EXTRA_MODULES` in `wristband/CMakeLists.txt`. Kconfig `HAPTIC_DA7280_TOTAL_DRIVE_CAP` is a hardware-safety cap. (`ZephyrProject/Drivers/da7280/da7280.c` is a stray copy and is not built.)
-- **Pin flow:** `main.c` loop → `pin_sensors_sample()` (`pin/src/sensors.c`) fills a frame and runs the pipeline → `pin_ble_send_frame()`. The pin is the BLE **central**: it scans for the wristband's service UUID, connects, and discovers the characteristic.
-- **Laptop link (`CONFIG_HAPNAV_LINK_LAPTOP`, `pin/prj_laptop.conf`):** `pin/CMakeLists.txt` compiles `src/ble_laptop.c` instead of `src/ble.c`. Both implement the `pin_ble_*` API in `src/ble.h`. In this mode the pin is a BLE **peripheral** advertising `HapNav-Pin` with its own UUIDs (`HAPNAV_UUID_LAPTOP_*`). Frames go out as notifications, split into chunks with a 1-byte `seq<<4|idx` header so they fit any MTU; `ble_proto.h` documents the format. `Tools/ble_receiver.py` (needs `pip install bleak`) reassembles the chunks, prints frames, and logs them to `Logs/ble_*.jsonl`.
+- **Pin flow:** `main.c` loop → `pin_sensors_sample()` (`pin/src/sensors.c`) fills a frame and runs the pipeline → `pin_ble_send_frame()`. `src/ble_link.c` owns the `pin_ble_*` API (`src/ble.h`): it calls `bt_enable()` once and sends each frame to every enabled, ready link. The links are independent. Wristband link (`CONFIG_HAPNAV_LINK_WRIST`, default y, `src/ble.c`): the pin is the BLE **central**; it scans for the wristband's service UUID, connects, and discovers the characteristic.
+- **Laptop link (`CONFIG_HAPNAV_LINK_LAPTOP`, `src/ble_laptop.c`):** `pin/prj_laptop.conf` enables it alone; `pin/prj_dual.conf` enables it together with the wristband link (`BT_MAX_CONN=2`). Both back-ends receive every connection callback, so each filters by role (`bt_conn_get_info()`: central = wristband, peripheral = laptop); keep that filtering when editing them. Here the pin is a BLE **peripheral** advertising `HapNav-Pin` with its own UUIDs (`HAPNAV_UUID_LAPTOP_*`). Frames go out as notifications, split into chunks with a 1-byte `seq<<4|idx` header so they fit any MTU; `ble_proto.h` documents the format. `Tools/ble_receiver.py` (needs `pip install bleak`) reassembles the chunks, prints frames, and logs them to `Logs/ble_*.jsonl`.
 - **Wristband flow:** it is the BLE **peripheral** (advertises `HapNav-Wrist`). `wristband/src/ble.c` `frame_write` → `hapnav_haptics_consume_frame()` → the haptics worker drives the motors.
 
 ### I²C topology

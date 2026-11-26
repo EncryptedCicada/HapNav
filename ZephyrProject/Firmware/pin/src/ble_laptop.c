@@ -1,7 +1,8 @@
 /*
  * Pin-side BLE, laptop link (CONFIG_HAPNAV_LINK_LAPTOP=y).
  *
- * Replaces src/ble.c at link time. Instead of scanning for the wristband, the
+ * Can run alone or alongside the wristband link (src/ble.c), so connection
+ * callbacks only act on peripheral-role connections. The
  * pin advertises as a connectable peripheral exposing one notify
  * characteristic. Once a laptop connects and enables notifications, every
  * hapnav_frame is pushed as one or more chunked notifications (chunk header
@@ -59,6 +60,16 @@ BT_GATT_SERVICE_DEFINE(laptop_svc,
  * to the value attribute (same convention as Zephyr's own samples). */
 #define FRAME_ATTR (&laptop_svc.attrs[1])
 
+/* True for connections where we are peripheral, i.e. the laptop link. The
+ * wristband link (central role) gets the same callbacks and must be ignored. */
+static bool is_laptop_conn(struct bt_conn *conn)
+{
+	struct bt_conn_info info;
+
+	return bt_conn_get_info(conn, &info) == 0 &&
+	       info.role == BT_CONN_ROLE_PERIPHERAL;
+}
+
 /* ── advertising ──────────────────────────────────────────────────────────── */
 
 static const struct bt_data ad[] = {
@@ -82,6 +93,9 @@ static const struct bt_data sd[] = {
 
 static void adv_start(void)
 {
+	if (current_conn) {
+		return;   /* one laptop at a time; restart after it disconnects */
+	}
 	int err = bt_le_adv_start(LAPTOP_ADV_PARAM, ad, ARRAY_SIZE(ad),
 				  sd, ARRAY_SIZE(sd));
 	if (err == -EALREADY) {
@@ -108,6 +122,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
 
+	if (!is_laptop_conn(conn)) {
+		return;
+	}
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 	if (err) {
 		LOG_ERR("Laptop connect from %s failed (0x%02x)", addr, err);
@@ -128,7 +145,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	ARG_UNUSED(conn);
+	if (conn != current_conn) {
+		return;   /* wristband link, or a stale conn — not ours */
+	}
 	LOG_INF("Laptop disconnected (reason 0x%02x)", reason);
 
 	atomic_set(&notify_enabled, false);
@@ -141,10 +160,12 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	if (old) {
 		bt_conn_unref(old);
 	}
-	/* Advertising restarts from recycled(): with CONFIG_BT_MAX_CONN=1 the
-	 * conn object isn't free yet here, so bt_le_adv_start() would fail. */
+	/* Advertising restarts from recycled(): the conn object isn't free yet
+	 * here, so bt_le_adv_start() could fail for lack of a conn slot. */
 }
 
+/* Fires when *any* conn object is freed (laptop or wristband); adv_start()
+ * is a no-op while a laptop is still connected. */
 static void recycled(void)
 {
 	k_work_submit(&adv_work);
@@ -153,8 +174,10 @@ static void recycled(void)
 static void le_param_updated(struct bt_conn *conn, uint16_t interval,
 			     uint16_t latency, uint16_t timeout)
 {
-	ARG_UNUSED(conn);
-	LOG_INF("Conn params: interval %u.%02u ms, latency %u, timeout %u ms",
+	if (!is_laptop_conn(conn)) {
+		return;
+	}
+	LOG_INF("Laptop conn params: interval %u.%02u ms, latency %u, timeout %u ms",
 		interval * 125 / 100, (interval * 125) % 100, latency, timeout * 10);
 }
 
@@ -167,36 +190,31 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 
 static void att_mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
 {
-	ARG_UNUSED(conn);
-	LOG_INF("ATT MTU updated: tx=%u rx=%u", tx, rx);
+	if (!is_laptop_conn(conn)) {
+		return;
+	}
+	LOG_INF("Laptop ATT MTU updated: tx=%u rx=%u", tx, rx);
 }
 
 static struct bt_gatt_cb gatt_callbacks = {
 	.att_mtu_updated = att_mtu_updated,
 };
 
-/* ── public API (same as src/ble.c) ───────────────────────────────────────── */
+/* ── back-end API (called from ble_link.c) ──────────────────────────────────── */
 
-int pin_ble_init(void)
+int pin_laptop_start(void)
 {
 	bt_gatt_cb_register(&gatt_callbacks);
-
-	int err = bt_enable(NULL);
-	if (err) {
-		LOG_ERR("bt_enable failed: %d", err);
-		return err;
-	}
-	LOG_INF("Bluetooth initialised (laptop link mode)");
 	adv_start();
 	return 0;
 }
 
-bool pin_ble_is_ready(void)
+bool pin_laptop_is_ready(void)
 {
 	return current_conn != NULL && atomic_get(&notify_enabled);
 }
 
-int pin_ble_send_frame(const struct hapnav_frame *frame)
+int pin_laptop_send(const struct hapnav_frame *frame)
 {
 	static uint8_t seq;
 	uint8_t buf[CHUNK_HDR_LEN + MAX_ATT_PAYLOAD];

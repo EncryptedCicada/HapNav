@@ -5,20 +5,26 @@
 
 rsource "../lib/sensors/Kconfig"
 
+config HAPNAV_LINK_WRIST
+	bool "Stream frames to the wristband"
+	default y
+	help
+	  The pin acts as a BLE central that scans for and connects to the
+	  HapNav wristband, writing each hapnav_frame (src/ble.c).
+
 config HAPNAV_LINK_LAPTOP
-	bool "Stream frames to a laptop instead of the wristband"
+	bool "Stream frames to a laptop"
 	default n
 	help
-	  Default (=n): the pin is a BLE central that scans for and connects
-	  to the HapNav wristband (src/ble.c).
-
-	  =y: the pin becomes a BLE peripheral advertising as
-	  CONFIG_BT_DEVICE_NAME with its own laptop service UUID
-	  (HAPNAV_UUID_LAPTOP_*). A laptop connects, subscribes to the frame
-	  characteristic, and receives every hapnav_frame as one or more
-	  notifications (src/ble_laptop.c). The wristband is never contacted.
-
-	  Enable via the overlay: -DEXTRA_CONF_FILE=prj_laptop.conf
+	  The pin acts as a BLE peripheral advertising as CONFIG_BT_DEVICE_NAME
+	  with its own laptop service UUID (HAPNAV_UUID_LAPTOP_*). A laptop
+	  connects, subscribes to the frame characteristic, and receives every
+	  hapnav_frame as one or more notifications (src/ble_laptop.c).
 	  Receiver script: Tools/ble_receiver.py
+
+	  Laptop only:          -DEXTRA_CONF_FILE=prj_laptop.conf
+	  Laptop + wristband:   -DEXTRA_CONF_FILE=prj_dual.conf
+
+	  At least one of HAPNAV_LINK_WRIST / HAPNAV_LINK_LAPTOP must be enabled.
 
 source "Kconfig.zephyr"
