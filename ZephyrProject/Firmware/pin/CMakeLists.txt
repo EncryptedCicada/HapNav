@@ -9,11 +9,14 @@ target_sources(app PRIVATE
     src/sensors.c
 )
 
-# Both files implement the pin_ble_* API in src/ble.h; pick one link target.
+# BLE: ble_link.c owns the pin_ble_* API and fans frames out to each enabled
+# link back-end (wristband, laptop, or both at once).
+target_sources(app PRIVATE src/ble_link.c)
+if(CONFIG_HAPNAV_LINK_WRIST)
+    target_sources(app PRIVATE src/ble.c)          # central → wristband
+endif()
 if(CONFIG_HAPNAV_LINK_LAPTOP)
     target_sources(app PRIVATE src/ble_laptop.c)   # peripheral → laptop
-else()
-    target_sources(app PRIVATE src/ble.c)          # central → wristband
 endif()
 
 # Pull in shared sources/headers (each subdirectory attaches itself to `app`).

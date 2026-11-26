@@ -1,3 +1,11 @@
+/*
+ * Pin-side BLE, wristband link (CONFIG_HAPNAV_LINK_WRIST=y).
+ *
+ * Central role: scans for the wristband's service UUID, connects, discovers
+ * the frame characteristic and writes each hapnav_frame (write-without-
+ * response). May share the radio with the laptop link (ble_laptop.c), so the
+ * connection callbacks only act on central-role connections we created.
+ */
 #include "ble.h"
 
 #include <zephyr/kernel.h>
@@ -35,10 +43,14 @@ static void mtu_exchanged(struct bt_conn *conn, uint8_t err,
 	}
 }
 
+static bool is_wrist_conn(struct bt_conn *conn);
+
 static void att_mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
 {
-	ARG_UNUSED(conn);
-	LOG_INF("ATT MTU updated: tx=%u rx=%u", tx, rx);
+	if (!is_wrist_conn(conn)) {
+		return;
+	}
+	LOG_INF("Wristband ATT MTU updated: tx=%u rx=%u", tx, rx);
 }
 
 static struct bt_gatt_cb gatt_callbacks = {
@@ -86,6 +98,16 @@ static void start_discovery(struct bt_conn *conn)
 	if (err) {
 		LOG_ERR("Service discovery failed: %d", err);
 	}
+}
+
+/* True for connections where we are central, i.e. the wristband link. The
+ * laptop link (peripheral role) gets the same callbacks and must be ignored. */
+static bool is_wrist_conn(struct bt_conn *conn)
+{
+	struct bt_conn_info info;
+
+	return bt_conn_get_info(conn, &info) == 0 &&
+	       info.role == BT_CONN_ROLE_CENTRAL;
 }
 
 /* ── scan / connect ───────────────────────────────────────────────────────── */
@@ -169,6 +191,9 @@ static void start_scan(void)
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+	if (!is_wrist_conn(conn)) {
+		return;
+	}
 	if (err) {
 		LOG_ERR("Connect failed (0x%02x)", err);
 		bt_conn_unref(default_conn);
@@ -176,7 +201,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		start_scan();
 		return;
 	}
-	LOG_INF("Connected");
+	LOG_INF("Wristband connected");
 
 	mtu_xchg_params.func = mtu_exchanged;
 	int merr = bt_gatt_exchange_mtu(conn, &mtu_xchg_params);
@@ -189,7 +214,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	LOG_INF("Disconnected (reason 0x%02x)", reason);
+	if (conn != default_conn) {
+		return;   /* laptop link, or a stale conn — not ours */
+	}
+	LOG_INF("Wristband disconnected (reason 0x%02x)", reason);
 	bt_conn_unref(default_conn);
 	default_conn = NULL;
 	frame_handle = 0;
@@ -201,23 +229,16 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.disconnected = disconnected,
 };
 
-/* ── public API ───────────────────────────────────────────────────────────── */
+/* ── back-end API (called from ble_link.c) ──────────────────────────────────── */
 
-int pin_ble_init(void)
+int pin_wrist_start(void)
 {
 	bt_gatt_cb_register(&gatt_callbacks);
-
-	int err = bt_enable(NULL);
-	if (err) {
-		LOG_ERR("bt_enable failed: %d", err);
-		return err;
-	}
-	LOG_INF("Bluetooth initialised");
 	start_scan();
 	return 0;
 }
 
-bool pin_ble_is_ready(void)
+bool pin_wrist_is_ready(void)
 {
 	if (!default_conn || !frame_handle) {
 		return false;
@@ -226,7 +247,7 @@ bool pin_ble_is_ready(void)
 	       sizeof(struct hapnav_frame) + 3;
 }
 
-int pin_ble_send_frame(const struct hapnav_frame *frame)
+int pin_wrist_send(const struct hapnav_frame *frame)
 {
 	if (!default_conn || !frame_handle) {
 		return -ENOTCONN;
